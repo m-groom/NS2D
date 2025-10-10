@@ -1,5 +1,5 @@
 """
-Visualization functions for NS2D simulation output.
+Visualisation functions for NS2D simulation output.
 
 This module provides plotting functions for:
 - Time series (energy, enstrophy, etc.)
@@ -12,15 +12,10 @@ import pathlib
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+from dedalus.extras import plot_tools
 
 # Use non-interactive backend by default for batch processing
 matplotlib.use("Agg")
-
-try:
-    from dedalus.extras import plot_tools
-    DEDALUS_AVAILABLE = True
-except ImportError:
-    DEDALUS_AVAILABLE = False
 
 
 def set_style(style="default"):
@@ -268,7 +263,7 @@ def plot_flux(times, kbins, T_list, Pi_list, outdir=".", flux_type="energy",
     plt.close()
 
 
-def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300):
+def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300, clims=None):
     """
     Plot 2D fields from a single snapshot.
 
@@ -280,13 +275,11 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300)
         dpi (int): Figure DPI
 
     Requires:
-        dedalus.extras.plot_tools (for advanced plotting)
+        dedalus.extras.plot_tools
 
     Generates:
         - snapshot_write_{write_number:06d}.png
     """
-    if not DEDALUS_AVAILABLE:
-        raise ImportError("Dedalus plot_tools not available. Cannot plot snapshots.")
 
     import h5py
     from . import io
@@ -307,7 +300,7 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300)
 
     nrows, ncols = 1, len(tasks)
     scale = 2.5
-    image = plot_tools.Box(1, 2)
+    image = plot_tools.Box(1, 1)
     pad = plot_tools.Frame(0.2, 0.0, 0.0, 0.0)
     margin = plot_tools.Frame(0.2, 0.1, 0.0, 0.0)
 
@@ -321,14 +314,25 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300)
         if write_index >= len(times):
             raise IndexError(f"Write index {write_index} out of range (max: {len(times)-1})")
 
-        # Compute symmetric color limits
-        clims = {}
-        for task in tasks:
-            if f"tasks/{task}" not in f:
-                raise KeyError(f"Task '{task}' not found in snapshot file")
-            data = np.array(f[f"tasks/{task}"][write_index])
-            abs_max = max(abs(data.min()), abs(data.max()))
-            clims[task] = (-abs_max, abs_max)
+        # Determine color limits: use provided clims if given; otherwise compute
+        # symmetric limits across all writes in this file for consistency
+        clims_use = {}
+        if clims is not None:
+            clims_use.update(clims)
+        else:
+            for task in tasks:
+                if f"tasks/{task}" not in f:
+                    raise KeyError(f"Task '{task}' not found in snapshot file")
+                dset_all = f[f"tasks/{task}"]
+                # Compute symmetric limits across all writes
+                # Note: using absolute max ensures consistent colorbars across frames
+                arr = np.asarray(dset_all[:])
+                finite_mask = np.isfinite(arr)
+                if not np.any(finite_mask):
+                    abs_max = 0.0
+                else:
+                    abs_max = float(np.nanmax(np.abs(arr[finite_mask])))
+                clims_use[task] = (-abs_max, abs_max)
 
         # Plot fields
         for n, task in enumerate(tasks):
@@ -336,7 +340,18 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300)
             ax = mfig.add_axes(i, j, [0, 0, 1, 1])
             dset = f[f"tasks/{task}"]
             plot_tools.plot_bot_3d(dset, 0, write_index, axes=ax,
-                                  title=task, clim=clims[task], visible_axes=False)
+                                  title=task, clim=clims_use.get(task), visible_axes=False)
+            # Enforce symmetric clim on the rendered artist in case backend overrides
+            vmin_vmax = clims_use.get(task)
+            if vmin_vmax is not None:
+                vmin, vmax = vmin_vmax
+                # Try images then collections for pcolormesh/imshow artists
+                for im in list(getattr(ax, 'images', [])) + list(getattr(ax, 'collections', [])):
+                    try:
+                        im.set_clim(vmin, vmax)
+                    except Exception:
+                        pass
+            ax.set_aspect('equal', adjustable='box')
 
         # Title
         tstr = f"t = {times[write_index]:.3f}"
@@ -344,7 +359,7 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300)
         fig.suptitle(tstr, x=0.45, y=title_height, ha="left")
 
         # Save
-        savename = f"snapshot_write_{int(writes[write_index]):06d}.png"
+        savename = f"snapshot_{int(writes[write_index]):06d}.png"
         fig.savefig(str(outdir / savename), dpi=dpi, bbox_inches="tight")
 
     plt.close(fig)

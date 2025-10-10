@@ -106,34 +106,7 @@ def compute_spectral_slope(kbins, spectrum, k_range=None, log_units=True):
     }
 
 
-def detect_cascade_direction(Pi_array, k_threshold=None):
-    """
-    Detect cascade direction from cumulative flux Π(k).
-
-    Positive Π indicates forward (downscale) cascade.
-    Negative Π indicates inverse (upscale) cascade.
-
-    Args:
-        Pi_array (ndarray): Cumulative flux array (M,)
-        k_threshold (int or None): Index threshold to check (default: middle)
-
-    Returns:
-        str: "forward", "inverse", or "mixed"
-    """
-    if k_threshold is None:
-        k_threshold = len(Pi_array) // 2
-
-    mid_flux = Pi_array[k_threshold]
-
-    if mid_flux > 0:
-        return "forward"
-    elif mid_flux < 0:
-        return "inverse"
-    else:
-        return "mixed"
-
-
-def compute_integral_scales(kbins, Ek):
+def compute_integral_scale(kbins, Ek):
     """
     Compute integral length scale from energy spectrum.
 
@@ -174,6 +147,8 @@ def compute_taylor_microscale(enstrophy, energy):
     """
     if enstrophy <= 0:
         raise ValueError("Enstrophy must be positive")
+    if energy <= 0:
+        raise ValueError("Energy must be positive")
 
     return np.sqrt(energy / enstrophy)
 

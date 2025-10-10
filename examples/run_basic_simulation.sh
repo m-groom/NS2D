@@ -72,4 +72,3 @@ python ../main.py \
 
 echo ""
 echo "Simulation complete! Output written to: $OUTDIR"
-echo "To visualize results, see the post-processing examples in the documentation."

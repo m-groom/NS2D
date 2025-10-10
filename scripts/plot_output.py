@@ -3,14 +3,14 @@
 """
 Plot NS2D simulation output: scalars, spectra, fluxes, and snapshots.
 
-This script provides a simple interface to visualize all output from a single
-NS2D realization. It automatically detects available data and generates plots.
+This script provides a simple interface to visualise all output from a single
+NS2D realisation. It automatically detects available data and generates plots.
 
 Usage:
-    python plot_output.py --run_dir path/to/realisation_0000 --out ./figures
+    python plot_output.py --rundir path/to/realisation_0000 --outdir ./figures
 
-    python plot_output.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 \\
-                          --out ./my_plots --dpi 150 --no_snapshots
+    python plot_output.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 \\
+                          --outdir ./my_plots --dpi 150 --no_snapshots
 
 For help:
     python plot_output.py --help
@@ -21,26 +21,27 @@ import pathlib
 import re
 import sys
 import numpy as np
+import h5py
 
 # Add parent directory to path to import post-processing module
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
-from post import io, visualization, analysis
+from post import io, visualisation, analysis
 
 
 def get_args():
     """Parse command-line arguments."""
     ap = argparse.ArgumentParser(
-        description="Plot scalars, spectra, fluxes, and snapshots for a single NS2D realization.",
+        description="Plot scalars, spectra, fluxes, and snapshots for a single NS2D realisation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     # Required arguments
-    ap.add_argument("--run_dir", type=str, required=True,
-                   help="Path to realization directory containing 'scalars', 'snapshots', and 'spectra.h5'")
+    ap.add_argument("--rundir", type=str, required=True,
+                   help="Path to realisation directory containing 'scalars', 'snapshots', and 'spectra.h5'")
 
     # Output
-    ap.add_argument("--out", type=str, default="./figures",
+    ap.add_argument("--outdir", type=str, default="./figures",
                    help="Output directory for generated figures")
     ap.add_argument("--dpi", type=int, default=300,
                    help="Figure DPI (resolution)")
@@ -78,18 +79,18 @@ def get_args():
     return ap.parse_args()
 
 
-def infer_nyquist(run_dir, Lx):
+def infer_nyquist(rundir, Lx):
     """
     Infer Nyquist wavenumber from directory name.
 
     Args:
-        run_dir (Path): Run directory path
+        rundir (Path): Run directory path
         Lx (float): Domain length
 
     Returns:
         float or None: Nyquist wavenumber
     """
-    run_str = str(run_dir)
+    run_str = str(rundir)
 
     # Try to extract Nx and Ny from path
     m_nx = re.search(r"Nx(\d+)", run_str)
@@ -109,20 +110,20 @@ def main():
     """Main execution function."""
     args = get_args()
 
-    run_dir = pathlib.Path(args.run_dir).resolve()
-    out_root = pathlib.Path(args.out).resolve()
+    rundir = pathlib.Path(args.rundir).resolve()
+    out_root = pathlib.Path(args.outdir).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
     print("NS2D Output Plotting")
     print("=" * 70)
-    print(f"Run directory: {run_dir}")
+    print(f"Run directory: {rundir}")
     print(f"Output directory: {out_root}")
     print(f"DPI: {args.dpi}")
     print("=" * 70)
 
     # Infer Nyquist wavenumber
-    k_nyquist = infer_nyquist(run_dir, args.Lx)
+    k_nyquist = infer_nyquist(rundir, args.Lx)
     if k_nyquist:
         print(f"Inferred Nyquist wavenumber: {k_nyquist:.2f}")
     else:
@@ -131,7 +132,7 @@ def main():
     # 1) Scalar time series
     if not args.no_scalars:
         print("\n[1/4] Plotting scalar time series...")
-        scalars_dir = run_dir / "scalars"
+        scalars_dir = rundir / "scalars"
 
         if not scalars_dir.exists():
             print(f"  Warning: No scalars directory found at {scalars_dir}")
@@ -141,7 +142,7 @@ def main():
                 print(f"  Loaded {len(times)} time points")
                 print(f"  Available scalars: {', '.join(series_dict.keys())}")
 
-                visualization.plot_time_series(
+                visualisation.plot_time_series(
                     times, series_dict,
                     outdir=out_root / "scalars",
                     dpi=args.dpi
@@ -161,7 +162,7 @@ def main():
     # 2) Spectra
     if not args.no_spectra:
         print("\n[2/4] Plotting spectra...")
-        spectra_path = run_dir / "spectra.h5"
+        spectra_path = rundir / "spectra.h5"
 
         if not spectra_path.exists():
             print(f"  Warning: No spectra file found at {spectra_path}")
@@ -171,7 +172,7 @@ def main():
                 print(f"  Loaded {len(times)} spectra snapshots")
                 print(f"  Wavenumber range: [{kbins[1]:.2f}, {kbins[-1]:.2f}]")
 
-                visualization.plot_spectra(
+                visualisation.plot_spectra(
                     times, kbins, Ek_list, Zk_list,
                     outdir=out_root / "spectra",
                     max_curves=args.spectra_max_curves,
@@ -187,7 +188,7 @@ def main():
     # 3) Fluxes
     if not args.no_flux:
         print("\n[3/4] Plotting fluxes...")
-        spectra_path = run_dir / "spectra.h5"
+        spectra_path = rundir / "spectra.h5"
 
         if not spectra_path.exists():
             print(f"  Warning: No spectra file found at {spectra_path}")
@@ -197,7 +198,7 @@ def main():
                 times_f, kbins_f, T_list, Pi_list = io.read_flux(spectra_path, flux_type="energy")
                 print(f"  Loaded {len(times_f)} energy flux snapshots")
 
-                visualization.plot_flux(
+                visualisation.plot_flux(
                     times_f, kbins_f, T_list, Pi_list,
                     outdir=out_root / "flux",
                     flux_type="energy",
@@ -215,15 +216,15 @@ def main():
                 times_fz, kbins_fz, TZ_list, PiZ_list = io.read_flux(spectra_path, flux_type="enstrophy")
                 print(f"  Loaded {len(times_fz)} enstrophy flux snapshots")
 
-                visualization.plot_flux(
+                visualisation.plot_flux(
                     times_fz, kbins_fz, TZ_list, PiZ_list,
-                    outdir=out_root / "enstrophy_flux",
+                    outdir=out_root / "flux",
                     flux_type="enstrophy",
                     max_curves=args.spectra_max_curves,
                     k_nyquist=k_nyquist,
                     dpi=args.dpi
                 )
-                print(f"  Saved enstrophy flux to {out_root / 'enstrophy_flux'}")
+                print(f"  Saved enstrophy flux to {out_root / 'flux'}")
 
             except Exception as e:
                 print(f"  Error plotting enstrophy flux: {e}")
@@ -231,7 +232,7 @@ def main():
     # 4) Snapshots
     if not args.no_snapshots:
         print("\n[4/4] Plotting snapshot frames...")
-        snaps_dir = run_dir / "snapshots"
+        snaps_dir = rundir / "snapshots"
 
         if not snaps_dir.exists():
             print(f"  Warning: No snapshots directory found at {snaps_dir}")
@@ -241,6 +242,36 @@ def main():
                 print(f"  Warning: No HDF5 files found in {snaps_dir}")
             else:
                 print(f"  Found {len(snap_files)} snapshot file(s)")
+
+                # Tasks to plot and for which to compute global color limits
+                plot_tasks = ["vorticity", "pressure", "streamfunction"]
+
+                # Compute global symmetric color limits across ALL files for consistency
+                global_fixed_clims = {}
+                try:
+                    for snap_h5 in snap_files:
+                        with h5py.File(snap_h5, 'r') as f:
+                            for tname in plot_tasks:
+                                ds_key = f"tasks/{tname}"
+                                if ds_key not in f:
+                                    continue
+                                arr = np.asarray(f[ds_key][:])
+                                finite_mask = np.isfinite(arr)
+                                if np.any(finite_mask):
+                                    vmax = float(np.nanmax(np.abs(arr[finite_mask])))
+                                else:
+                                    vmax = 0.0
+                                prev = global_fixed_clims.get(tname, (0.0, 0.0))
+                                prev_abs = max(abs(prev[0]), abs(prev[1]))
+                                if vmax > prev_abs:
+                                    global_fixed_clims[tname] = (-vmax, vmax)
+                    # Fallback to zeros if nothing found
+                    for tname in plot_tasks:
+                        if tname not in global_fixed_clims:
+                            global_fixed_clims[tname] = (-0.0, 0.0)
+                except Exception as e:
+                    print(f"    Warning: could not compute global clims: {e}")
+                    global_fixed_clims = {}
 
                 for snap_h5 in snap_files:
                     try:
@@ -252,17 +283,33 @@ def main():
                         subdir = out_root / "snapshots" / snap_h5.stem
                         subdir.mkdir(parents=True, exist_ok=True)
 
-                        # Plot selected snapshots
-                        for idx in range(args.snap_start,
-                                       min(args.snap_start + args.snap_count, info['n_writes']),
-                                       max(1, args.snap_stride)):
-                            visualization.plot_snapshot(
+                        # Plot selected snapshots with progress output
+                        idx_list = list(range(
+                            args.snap_start,
+                            min(args.snap_start + args.snap_count, info['n_writes']),
+                            max(1, args.snap_stride)
+                        ))
+                        total = len(idx_list)
+                        bar_width = 30
+
+                        for pos, idx in enumerate(idx_list, start=1):
+                            visualisation.plot_snapshot(
                                 snap_h5,
                                 write_index=idx,
-                                tasks=["vorticity", "pressure", "streamfunction"],
+                                tasks=plot_tasks,
                                 outdir=subdir,
-                                dpi=args.dpi
+                                dpi=args.dpi,
+                                clims=global_fixed_clims
                             )
+
+                            # Simple terminal progress bar
+                            filled = int(bar_width * pos / max(1, total))
+                            bar = "#" * filled + "-" * (bar_width - filled)
+                            percent = int(100 * pos / max(1, total))
+                            print(f"    [{bar}] {pos}/{total} ({percent}%)", end='\r', flush=True)
+
+                        if total > 0:
+                            print()  # newline after finishing bar
 
                         print(f"    Saved to {subdir}")
 
