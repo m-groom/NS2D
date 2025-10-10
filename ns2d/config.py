@@ -90,7 +90,7 @@ def get_args():
     )
     forcing_group.add_argument(
         "--f_sigma", type=float, default=0.02,
-        help="Base spectral forcing amplitude (rescaled by constant-power constraint)"
+        help="Base spectral forcing amplitude (used directly if power_mode='sigma')"
     )
     forcing_group.add_argument(
         "--tau_ou", type=float, default=0.3,
@@ -102,6 +102,11 @@ def get_args():
     const_power_group.add_argument(
         "--eps_target", type=float, default=1.0e-3,
         help="Target domain-averaged energy injection rate ε = <u·f>"
+    )
+    const_power_group.add_argument(
+        "--power_mode", type=str, default="constant",
+        choices=["constant", "sigma"],
+        help="Forcing power handling: 'constant' rescales to hit eps_target; 'sigma' uses f_sigma directly"
     )
     const_power_group.add_argument(
         "--eps_floor", type=float, default=1.0e-12,
@@ -225,8 +230,8 @@ def validate_args(args):
             raise ValueError("Base forcing amplitude f_sigma must be positive")
         if args.stoch_type == "ou" and args.tau_ou <= 0:
             raise ValueError("OU correlation time tau_ou must be positive")
-        if args.eps_target <= 0:
-            raise ValueError("Target injection rate eps_target must be positive")
+        if args.power_mode == "constant" and args.eps_target <= 0:
+            raise ValueError("Target injection rate eps_target must be positive when power_mode='constant'")
 
     # Check time parameters
     if args.t_end <= 0:

@@ -7,7 +7,7 @@ Forced 2D incompressible Navier-Stokes (velocity-pressure formulation) on a toru
 ### Simulation
 - Pseudo-spectral solver using Fourier basis
 - Distributed memory parallelisation via MPI
-- Band-limited white noise or Ornstein-Uhlenbeck forcing with constant-power constraint
+- Band-limited white noise or Ornstein-Uhlenbeck forcing with optional constant-power rescaling
 - Diagnostics:
   - Energy/enstrophy spectra and spectral fluxes
   - Time series of integrated quantities (energy, enstrophy, palinstrophy, energy budget terms)
@@ -117,7 +117,7 @@ NS2D/
 **Simulation (ns2d/):**
 - **config.py**: Command-line argument parsing and validation
 - **domain.py**: Domain construction, wavenumber grids, initial conditions
-- **forcing.py**: Band-limited stochastic forcing (white noise, OU process) with constant-power rescaling
+- **forcing.py**: Band-limited stochastic forcing (white noise, OU process) with optional constant-power rescaling
 - **spectral.py**: Computation of energy/enstrophy spectra and spectral fluxes
 - **solver.py**: Dedalus problem setup, time integration, output management
 - **utils.py**: MPI field gathering, global diagnostics, Reynolds number computation
@@ -153,7 +153,9 @@ Two stochastic forcing types are supported:
 Both forcing types:
 - Are band-limited to wavenumber shell [kmin, kmax]
 - Enforce incompressibility (∇·f = 0)
-- Use constant-power rescaling to maintain target energy injection rate ε = ⟨u·f⟩
+- Support two power modes:
+  - Default: constant-power rescaling to maintain target energy injection rate ε = ⟨u·f⟩
+  - `--power_mode sigma`: no rescaling; uses `f_sigma` directly as the forcing amplitude
 
 ## Configuration
 
@@ -172,8 +174,9 @@ All simulation parameters are controlled via command-line arguments. Key options
 - `--forcing`: `stochastic` or `none` (default: stochastic)
 - `--stoch_type`: `white` or `ou` (default: ou)
 - `--kmin`, `--kmax`: Forcing wavenumber band (default: 8.0–12.0)
-- `--eps_target`: Target energy injection rate (default: 0.001)
-- `--f_sigma`: Base forcing amplitude (default: 0.02)
+- `--power_mode`: `constant` (default) or `sigma`. `constant` rescales to hit `eps_target`; `sigma` uses `f_sigma` directly.
+- `--eps_target`: Target energy injection rate (used when `--power_mode constant`, default: 0.001)
+- `--f_sigma`: Base forcing amplitude (used directly when `--power_mode sigma`, default: 0.02)
 - `--tau_ou`: OU correlation time (default: 0.3)
 - `--eps_floor`: Floor value to prevent division by tiny values (default: 1.0e-12)
 - `--eps_smooth`: Exponential smoothing for rescaling (default: 0.0)

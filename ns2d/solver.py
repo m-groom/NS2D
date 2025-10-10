@@ -137,7 +137,7 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
 
 def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
     """
-    Setup forcing function with constant-power rescaling.
+    Setup forcing function with optional constant-power rescaling.
 
     Args:
         args: Command-line arguments
@@ -148,8 +148,8 @@ def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
         dtype: Data type for arrays
 
     Returns:
-        callable: update_forcing(dt, u) function that updates forcing_vec
-            with constant-power rescaling applied.
+        callable: update_forcing(dt, u) function that updates forcing_vec;
+                  applies constant-power only if power_mode=='constant'.
     """
     forcing_vec.change_scales(1)
 
@@ -176,7 +176,7 @@ def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
     scale_state = np.array([1.0], dtype=np.float64)
 
     def update_forcing(dt, u):
-        """Update forcing with constant-power rescaling."""
+        """Update forcing, optionally applying constant-power rescaling."""
         # Generate base forcing on rank 0
         if comm.rank == 0:
             fx, fy = stoch_update(dt)
@@ -199,16 +199,19 @@ def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
         ux_loc = u['g'][0]
         uy_loc = u['g'][1]
 
-        # Apply constant-power rescaling
-        fx_rescaled, fy_rescaled = forcing.constant_power_rescale(
-            fx_loc, fy_loc, ux_loc, uy_loc, comm, args.Nx, args.Ny,
-            args.eps_target, args.eps_floor, args.eps_clip,
-            scale_state, args.eps_smooth
-        )
-
-        # Assign to forcing field
-        forcing_vec['g'][0] = fx_rescaled
-        forcing_vec['g'][1] = fy_rescaled
+        if getattr(args, 'power_mode', 'constant') == 'constant':
+            # Apply constant-power rescaling
+            fx_rescaled, fy_rescaled = forcing.constant_power_rescale(
+                fx_loc, fy_loc, ux_loc, uy_loc, comm, args.Nx, args.Ny,
+                args.eps_target, args.eps_floor, args.eps_clip,
+                scale_state, args.eps_smooth
+            )
+            forcing_vec['g'][0] = fx_rescaled
+            forcing_vec['g'][1] = fy_rescaled
+        else:
+            # 'sigma' mode: use generator amplitude directly
+            forcing_vec['g'][0] = fx_loc
+            forcing_vec['g'][1] = fy_loc
 
     return update_forcing
 
