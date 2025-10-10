@@ -65,8 +65,8 @@ def get_args():
     # Snapshot selection
     ap.add_argument("--snap_start", type=int, default=0,
                    help="Starting write index for snapshots")
-    ap.add_argument("--snap_count", type=int, default=100,
-                   help="Number of snapshot writes to plot")
+    ap.add_argument("--snap_count", type=int, default=0,
+                   help="Number of snapshot writes to plot (0 = all)")
     ap.add_argument("--snap_stride", type=int, default=1,
                    help="Stride between snapshot writes")
 
@@ -284,11 +284,15 @@ def main():
                         subdir.mkdir(parents=True, exist_ok=True)
 
                         # Plot selected snapshots with progress output
-                        idx_list = list(range(
-                            args.snap_start,
-                            min(args.snap_start + args.snap_count, info['n_writes']),
-                            max(1, args.snap_stride)
-                        ))
+                        # Apply stride across the full available writes, then limit by count.
+                        stride = max(1, args.snap_stride)
+                        # Clamp start within available range
+                        start = min(max(0, args.snap_start), max(0, info['n_writes'] - 1))
+                        candidates = list(range(start, info['n_writes'], stride))
+                        if args.snap_count is not None and args.snap_count > 0:
+                            idx_list = candidates[:args.snap_count]
+                        else:
+                            idx_list = candidates
                         total = len(idx_list)
                         bar_width = 30
 

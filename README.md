@@ -124,7 +124,7 @@ NS2D/
 
 **Post-Processing (post/):**
 - **io.py**: Load simulation output (scalars, spectra, fluxes, snapshots)
-- **visualisation.py**: Create publication-quality plots
+- **visualisation.py**: Create plots
 - **analysis.py**: Compute statistics, spectral slopes, derived quantities
 
 ## Physics
@@ -266,31 +266,10 @@ python scripts/compute_statistics.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/re
 ```
 
 This computes:
-- Time-averaged statistics (mean, std, min, max)
+- Time-averaged statistics (mean, std, min, max) between `t_start` and `t_end`
 - Energy balance verification
-- Spectral slopes and power-law fits
+- Spectral slopes and power-law fits over specified `k_range`
 - Integral and Taylor microscales
-- Cascade direction detection
-
-### Custom Analysis
-
-Import the post-processing modules for custom workflows:
-
-```python
-from post import io, visualisation, analysis
-
-# Load data
-times, series = io.read_scalars("path/to/scalars/")
-times_s, kbins, Ek_list, Zk_list = io.read_spectra("path/to/spectra.h5")
-
-# Analyze
-E_mean = analysis.time_average(times, series['energy'], t_start=100)
-slope_info = analysis.compute_spectral_slope(kbins, Ek_list[-1], k_range=(20, 50))
-
-# Visualise
-visualisation.plot_time_series(times, series, outdir="./plots")
-visualisation.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
-```
 
 ### Post-Processing Options
 
