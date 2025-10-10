@@ -211,3 +211,5 @@ figures/
 *.png 
 *.mp4
 
+# Ignore coding agent files
+CLAUDE.md

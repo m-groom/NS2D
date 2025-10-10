@@ -3,20 +3,19 @@
 """
 Compute statistics and derived quantities from NS2D simulation output.
 
-This script analyzes scalar time series and spectra to compute:
+This script analyses scalar time series and spectra to compute:
 - Time-averaged statistics
 - Spectral slopes and scaling exponents
 - Integral and Taylor microscales
-- Energy cascade direction
 
 Usage:
-    python analyze_statistics.py --run_dir path/to/realisation_0000
+    python compute_statistics.py --rundir path/to/realisation_0000
 
-    python analyze_statistics.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 \\
+    python compute_statistics.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 \\
                                  --t_start 50 --t_end 200
 
 For help:
-    python analyze_statistics.py --help
+    python compute_statistics.py --help
 """
 
 import argparse
@@ -37,8 +36,8 @@ def get_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    ap.add_argument("--run_dir", type=str, required=True,
-                   help="Path to realization directory")
+    ap.add_argument("--rundir", type=str, required=True,
+                   help="Path to realisation directory")
 
     ap.add_argument("--t_start", type=float, default=None,
                    help="Start time for statistics (default: first time)")
@@ -59,15 +58,15 @@ def main():
     """Main execution function."""
     args = get_args()
 
-    run_dir = pathlib.Path(args.run_dir).resolve()
+    rundir = pathlib.Path(args.rundir).resolve()
 
     print("=" * 70)
     print("NS2D Statistics Analysis")
     print("=" * 70)
-    print(f"Run directory: {run_dir}")
+    print(f"Run directory: {rundir}")
 
     # Load scalar time series
-    scalars_dir = run_dir / "scalars"
+    scalars_dir = rundir / "scalars"
     if not scalars_dir.exists():
         print(f"Error: No scalars directory found at {scalars_dir}")
         return
@@ -109,6 +108,8 @@ def main():
         lambda_T = analysis.compute_taylor_microscale(Z_mean, E_mean)
         print(f"\nTaylor microscale λ: {lambda_T:.5e}")
 
+        # TODO: Taylor microscale Reynolds number
+
         # Energy balance (if all terms available)
         if all(k in series_dict for k in ["inj", "drag_loss", "visc_loss"]):
             mask = (times >= t_start) & (times <= t_end)
@@ -126,7 +127,7 @@ def main():
             print(f"  Relative error:      {abs(residual/inj_mean)*100:.2f}%")
 
     # Spectral analysis
-    spectra_path = run_dir / "spectra.h5"
+    spectra_path = rundir / "spectra.h5"
     if spectra_path.exists():
         print("\n" + "=" * 70)
         print("Spectral Analysis")
@@ -135,15 +136,27 @@ def main():
         try:
             times_spec, kbins, Ek_list, Zk_list = io.read_spectra(spectra_path)
 
-            # Use last spectrum for analysis
-            Ek_final = Ek_list[-1]
-            Zk_final = Zk_list[-1]
+            # Time-average spectra over [t_start, t_end]
+            mask_spec = (times_spec >= t_start) & (times_spec <= t_end)
+            if not np.any(mask_spec):
+                print(f"Warning: No spectra in time range [{t_start}, {t_end}]")
+                print(f"Using last spectrum at t = {times_spec[-1]:.2f}")
+                Ek_mean = Ek_list[-1]
+                Zk_mean = Zk_list[-1]
+                t_range_str = f"t = {times_spec[-1]:.2f}"
+            else:
+                Ek_mean = np.mean(Ek_list[mask_spec], axis=0)
+                Zk_mean = np.mean(Zk_list[mask_spec], axis=0)
+                n_samples = np.sum(mask_spec)
+                t_range_str = f"t ∈ [{t_start:.2f}, {t_end:.2f}] ({n_samples} snapshots)"
 
-            print(f"\nAnalyzing spectrum at t = {times_spec[-1]:.2f}")
+            print(f"\nAnalysing time-averaged spectrum over {t_range_str}")
 
             # Integral length scale
-            L_int = analysis.compute_integral_scales(kbins, Ek_final)
+            L_int = analysis.compute_integral_scale(kbins, Ek_mean)
             print(f"Integral length scale L_int: {L_int:.5e}")
+
+            # TODO: integral scale Reynolds number
 
             # Spectral slope (if k_range specified)
             if args.k_range:
@@ -151,28 +164,18 @@ def main():
                 print(f"\nFitting spectral slope in range [{k_min}, {k_max}]:")
 
                 try:
-                    slope_E = analysis.compute_spectral_slope(kbins, Ek_final, (k_min, k_max))
+                    slope_E = analysis.compute_spectral_slope(kbins, Ek_mean, (k_min, k_max))
                     print(f"\nEnergy spectrum E(k):")
                     print(f"  Slope:      {slope_E['slope']:.3f}")
                     print(f"  R²:         {slope_E['r_squared']:.4f}")
 
-                    slope_Z = analysis.compute_spectral_slope(kbins, Zk_final, (k_min, k_max))
+                    slope_Z = analysis.compute_spectral_slope(kbins, Zk_mean, (k_min, k_max))
                     print(f"\nEnstrophy spectrum Z(k):")
                     print(f"  Slope:      {slope_Z['slope']:.3f}")
                     print(f"  R²:         {slope_Z['r_squared']:.4f}")
 
                 except ValueError as e:
                     print(f"  Error: {e}")
-
-            # Cascade direction
-            try:
-                _, _, _, Pi_list = io.read_flux(spectra_path, flux_type="energy")
-                Pi_final = Pi_list[-1]
-                direction = analysis.detect_cascade_direction(Pi_final)
-                print(f"\nEnergy cascade direction: {direction}")
-
-            except Exception as e:
-                print(f"\nCould not determine cascade direction: {e}")
 
         except Exception as e:
             print(f"Error in spectral analysis: {e}")
@@ -182,7 +185,7 @@ def main():
         output_path = pathlib.Path(args.output)
         with open(output_path, "w") as f:
             f.write("# NS2D Statistics Summary\n")
-            f.write(f"# Run directory: {run_dir}\n")
+            f.write(f"# Run directory: {rundir}\n")
             f.write(f"# Time range: [{t_start}, {t_end}]\n\n")
 
             f.write("# Scalar Statistics\n")
