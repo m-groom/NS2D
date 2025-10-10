@@ -206,7 +206,7 @@ def compute_dissipation_rate(series_dict, nu, alpha=0):
     """
     Compute total dissipation rate from enstrophy and drag.
 
-    ε_total = ν·Z + α·E
+    ε_total = ν·Z + 2α·E
 
     Args:
         series_dict (dict): Dictionary containing 'enstrophy' and 'energy'
@@ -220,7 +220,7 @@ def compute_dissipation_rate(series_dict, nu, alpha=0):
         raise KeyError("Required 'enstrophy' and 'energy' not in series_dict")
 
     eps_visc = nu * series_dict["enstrophy"]
-    eps_drag = alpha * series_dict["energy"]
+    eps_drag = 2 * alpha * series_dict["energy"]
 
     return eps_visc + eps_drag
 
