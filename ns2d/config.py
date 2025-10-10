@@ -240,4 +240,4 @@ def validate_args(args):
         raise ValueError("All output intervals must be positive")
 
     if args.n_realisations <= 0:
-        raise ValueError("Number of realizations must be positive")
+        raise ValueError("Number of realisations must be positive")

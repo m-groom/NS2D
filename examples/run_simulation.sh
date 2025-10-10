@@ -6,13 +6,13 @@
 # - Moderate resolution (512x512)
 # - Stochastic OU forcing in wavenumber band [20, 30]
 # - Constant-power injection at epsilon = 0.01
-# - Standard output cadences
+# - Specified output cadences
 #
 # Usage:
-#   bash run_basic_simulation.sh
+#   bash run_simulation.sh
 #
 # For MPI parallel execution:
-#   mpiexec -n 8 bash run_basic_simulation.sh
+#   mpiexec -n 8 bash run_simulation.sh
 
 set -e  # Exit on error
 
@@ -31,20 +31,20 @@ FORCING_TYPE="stochastic"
 STOCH_TYPE="ou"
 KMIN=20.0
 KMAX=30.0
-EPS_TARGET=0.01
+EPS_TARGET=0.005
 TAU_OU=0.3
-EPS_SMOOTH=0.3
+EPS_SMOOTH=0.0
 
 # Time integration
 T_END=100.0
 CFL_SAFETY=0.4
 
 # Output
-OUTDIR="output_basic_simulation"
-TAG="basic"
-SNAP_DT=2.0
-SPECTRA_DT=0.5
-SCALARS_DT=0.1
+OUTDIR="output"
+TAG=""
+SNAP_DT=1.0
+SPECTRA_DT=0.25
+SCALARS_DT=0.05
 
 # Run simulation
 python ../main.py \

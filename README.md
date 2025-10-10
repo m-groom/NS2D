@@ -89,11 +89,10 @@ NS2D/
 ├── main.py                      # Main entry point
 │
 ├── examples/                    # Example run scripts
-│   ├── run_basic_simulation.sh
-│   └── run_hpc_ensemble.sh
+│   └── run_simulation.sh
 │
 ├── ns2d/                        # Main simulation package
-│   ├── __init__.py              # Package initialization
+│   ├── __init__.py              # Package initialisation
 │   ├── config.py                # Configuration and argument parsing
 │   ├── domain.py                # Domain setup and initial conditions
 │   ├── forcing.py               # Stochastic forcing implementations
@@ -101,15 +100,16 @@ NS2D/
 │   ├── solver.py                # Main solver and time integration
 │   └── utils.py                 # MPI utilities and diagnostics
 │
-├── post/                 # Post-processing toolkit
-│   ├── __init__.py              # Package initialization
+├── post/                        # Post-processing toolkit
+│   ├── __init__.py              # Package initialisation
 │   ├── io.py                    # Data loading utilities
-│   ├── visualization.py         # Plotting functions
+│   ├── visualisation.py         # Plotting functions
 │   └── analysis.py              # Statistical analysis
 │
 └── scripts/                     # Ready-to-use analysis scripts
     ├── plot_output.py           # Auto-generate all plots
-    └── analyze_statistics.py    # Compute statistics
+    ├── compute_statistics.py    # Compute statistics
+    └── animate_snapshots.sh     # Create animations from snapshots
 ```
 
 ### Module Overview
@@ -124,7 +124,7 @@ NS2D/
 
 **Post-Processing (post/):**
 - **io.py**: Load simulation output (scalars, spectra, fluxes, snapshots)
-- **visualization.py**: Create publication-quality plots
+- **visualisation.py**: Create publication-quality plots
 - **analysis.py**: Compute statistics, spectral slopes, derived quantities
 
 ## Physics
@@ -191,7 +191,7 @@ All simulation parameters are controlled via command-line arguments. Key options
 - `--spectra_dt`: Spectra/flux output interval (default: 0.25)
 
 ### Ensemble
-- `--n_realisations`: Number of independent realizations (default: 1)
+- `--n_realisations`: Number of independent realisations (default: 1)
 - `--seed`: Base random seed (default: 42)
 
 ### MPI
@@ -204,7 +204,7 @@ Run `python main.py --help` for the complete list.
 
 ## Output
 
-Output is organized by run parameters and realisation, for example:
+Output is organised by run parameters and realisation, for example:
 
 ```
 snapshots/
@@ -240,9 +240,9 @@ snapshots/
 
 ## Post-Processing
 
-NS2D includes a comprehensive post-processing toolkit for analyzing and visualizing simulation output.
+NS2D includes a comprehensive post-processing toolkit for analysing and visualising simulation output.
 
-### Quick Start: Visualize Output
+### Quick Start: Visualise Output
 
 Generate all standard plots automatically:
 
@@ -259,7 +259,7 @@ This creates:
 ### Compute Statistics
 
 ```bash
-python scripts/analyze_statistics.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --t_start 100 --t_end 500 --k_range 20 50
+python scripts/compute_statistics.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --t_start 100 --t_end 500 --k_range 20 50
 ```
 
 This computes:
@@ -274,7 +274,7 @@ This computes:
 Import the post-processing modules for custom workflows:
 
 ```python
-from post import io, visualization, analysis
+from post import io, visualisation, analysis
 
 # Load data
 times, series = io.read_scalars("path/to/scalars/")
@@ -284,9 +284,9 @@ times_s, kbins, Ek_list, Zk_list = io.read_spectra("path/to/spectra.h5")
 E_mean = analysis.time_average(times, series['energy'], t_start=100)
 slope_info = analysis.compute_spectral_slope(kbins, Ek_list[-1], k_range=(20, 50))
 
-# Visualize
-visualization.plot_time_series(times, series, outdir="./plots")
-visualization.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
+# Visualise
+visualisation.plot_time_series(times, series, outdir="./plots")
+visualisation.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
 ```
 
 ### Post-Processing Options
@@ -297,7 +297,7 @@ visualization.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
 - `--spectra_max_curves N`: Number of time curves to overlay
 - `--spectra_loglog`: Use log-log axes
 
-**analyze_statistics.py options:**
+**compute_statistics.py options:**
 - `--t_start`, `--t_end`: Time range for statistics
 - `--k_range K_MIN K_MAX`: Wavenumber range for spectral fitting
 - `--output FILE`: Save statistics to file
@@ -310,7 +310,7 @@ visualization.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
 - **Dedalus** v3 (spectral PDE solver)
 - **NumPy** (array operations)
 - **h5py** (HDF5 I/O)
-- **mpi4py** (MPI parallelization)
+- **mpi4py** (MPI parallelisation)
 
 ### Post-Processing
 
