@@ -7,12 +7,13 @@ This script analyses scalar time series and spectra to compute:
 - Time-averaged statistics
 - Spectral slopes and scaling exponents
 - Integral and Taylor microscales
+- Reynolds numbers (Taylor and integral scale)
 
 Usage:
-    python compute_statistics.py --rundir path/to/realisation_0000
+    python compute_statistics.py --rundir path/to/realisation_0000 --nu 5e-5
 
     python compute_statistics.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 \\
-                                 --t_start 50 --t_end 200
+                                 --t_start 50 --t_end 200 --nu 5e-5 --k_range 20 100
 
 For help:
     python compute_statistics.py --help
@@ -47,6 +48,10 @@ def get_args():
     # Spectral analysis
     ap.add_argument("--k_range", nargs=2, type=float, default=None,
                    help="Wavenumber range [k_min k_max] for spectral slope fitting")
+
+    # Reynolds numbers
+    ap.add_argument("--nu", type=float, default=None,
+                   help="Kinematic viscosity (required for Reynolds number computation)")
 
     ap.add_argument("--output", type=str, default=None,
                    help="Output file for statistics (default: print to stdout)")
@@ -108,7 +113,10 @@ def main():
         lambda_T = analysis.compute_taylor_microscale(Z_mean, E_mean)
         print(f"\nTaylor microscale λ: {lambda_T:.5e}")
 
-        # TODO: Taylor microscale Reynolds number
+        # Reynolds numbers (if viscosity provided)
+        if args.nu is not None:
+            Re_lambda = analysis.compute_taylor_reynolds(E_mean, Z_mean, args.nu)
+            print(f"Taylor Reynolds number Re_λ: {Re_lambda:.2f}")
 
         # Energy balance (if all terms available)
         if all(k in series_dict for k in ["inj", "drag_loss", "visc_loss"]):
@@ -136,17 +144,21 @@ def main():
         try:
             times_spec, kbins, Ek_list, Zk_list = io.read_spectra(spectra_path)
 
+            # Convert lists to arrays for indexing
+            Ek_array = np.array(Ek_list)
+            Zk_array = np.array(Zk_list)
+
             # Time-average spectra over [t_start, t_end]
             mask_spec = (times_spec >= t_start) & (times_spec <= t_end)
             if not np.any(mask_spec):
                 print(f"Warning: No spectra in time range [{t_start}, {t_end}]")
                 print(f"Using last spectrum at t = {times_spec[-1]:.2f}")
-                Ek_mean = Ek_list[-1]
-                Zk_mean = Zk_list[-1]
+                Ek_mean = Ek_array[-1]
+                Zk_mean = Zk_array[-1]
                 t_range_str = f"t = {times_spec[-1]:.2f}"
             else:
-                Ek_mean = np.mean(Ek_list[mask_spec], axis=0)
-                Zk_mean = np.mean(Zk_list[mask_spec], axis=0)
+                Ek_mean = np.mean(Ek_array[mask_spec], axis=0)
+                Zk_mean = np.mean(Zk_array[mask_spec], axis=0)
                 n_samples = np.sum(mask_spec)
                 t_range_str = f"t ∈ [{t_start:.2f}, {t_end:.2f}] ({n_samples} snapshots)"
 
@@ -156,7 +168,10 @@ def main():
             L_int = analysis.compute_integral_scale(kbins, Ek_mean)
             print(f"Integral length scale L_int: {L_int:.5e}")
 
-            # TODO: integral scale Reynolds number
+            # Integral Reynolds number (if viscosity and energy available)
+            if args.nu is not None and "energy" in stats:
+                Re_L = analysis.compute_integral_reynolds(L_int, stats["energy"]["mean"], args.nu)
+                print(f"Integral Reynolds number Re_L: {Re_L:.2f}")
 
             # Spectral slope (if k_range specified)
             if args.k_range:

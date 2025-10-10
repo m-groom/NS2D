@@ -223,3 +223,56 @@ def compute_dissipation_rate(series_dict, nu, alpha=0):
     eps_drag = alpha * series_dict["energy"]
 
     return eps_visc + eps_drag
+
+
+def compute_taylor_reynolds(energy, enstrophy, nu):
+    """
+    Compute Taylor-scale Reynolds number.
+
+    Re_λ = u_rms * λ / ν where λ = √(E/Z) and u_rms = √(2E)
+
+    Args:
+        energy (float): Total kinetic energy
+        enstrophy (float): Total enstrophy
+        nu (float): Kinematic viscosity
+
+    Returns:
+        float: Taylor-scale Reynolds number
+    """
+    if energy <= 0 or enstrophy <= 0:
+        raise ValueError("Energy and enstrophy must be positive")
+    if nu <= 0:
+        raise ValueError("Viscosity must be positive")
+
+    lambda_T = np.sqrt(energy / enstrophy)
+    u_rms = np.sqrt(2 * energy)
+    Re_lambda = u_rms * lambda_T / nu
+
+    return Re_lambda
+
+
+def compute_integral_reynolds(L_int, energy, nu):
+    """
+    Compute integral-scale Reynolds number.
+
+    Re_L = u_rms * L_int / ν where u_rms = √(2E)
+
+    Args:
+        L_int (float): Integral length scale
+        energy (float): Total kinetic energy
+        nu (float): Kinematic viscosity
+
+    Returns:
+        float: Integral-scale Reynolds number
+    """
+    if energy <= 0:
+        raise ValueError("Energy must be positive")
+    if nu <= 0:
+        raise ValueError("Viscosity must be positive")
+    if L_int <= 0:
+        raise ValueError("Integral length scale must be positive")
+
+    u_rms = np.sqrt(2 * energy)
+    Re_L = u_rms * L_int / nu
+
+    return Re_L
