@@ -41,19 +41,19 @@ pip install -r requirements.txt
 
 3. Run a simple test:
 ```bash
-python main.py --Nx 256 --Ny 256 --t_end 10
+python main.py --t_end 10
 ```
 
 ### Basic Usage
 
 **Single-core simulation:**
 ```bash
-python main.py --Nx 512 --Ny 512 --nu 1e-4 --t_end 100
+python main.py --t_end 200
 ```
 
 **MPI parallel simulation (8 processes):**
 ```bash
-mpiexec -n 8 python main.py --Nx 1024 --Ny 1024 --nu 5e-5 --t_end 200
+mpiexec -n 8 python main.py --t_end 200
 ```
 
 **Custom forcing parameters:**
@@ -160,28 +160,31 @@ Both forcing types:
 All simulation parameters are controlled via command-line arguments. Key options include:
 
 ### Domain & Resolution
-- `--Nx`, `--Ny`: Grid resolution (default: 1024 × 1024)
+- `--Nx`, `--Ny`: Grid resolution (default: 256 × 256)
 - `--Lx`, `--Ly`: Domain size (default: 2π × 2π)
 - `--dealias`: Dealiasing factor (default: 1.5)
 
 ### Physics
-- `--nu`: Kinematic viscosity (default: 5×10⁻⁵)
-- `--alpha`: Linear friction coefficient (default: 0.05, use 0 to disable)
+- `--nu`: Kinematic viscosity (default: 5×10⁻⁴)
+- `--alpha`: Linear friction coefficient (default: 0.025, use 0 to disable)
 
 ### Forcing
 - `--forcing`: `stochastic` or `none` (default: stochastic)
 - `--stoch_type`: `white` or `ou` (default: ou)
-- `--kmin`, `--kmax`: Forcing wavenumber band (default: 25–35)
-- `--eps_target`: Target energy injection rate (default: 0.01)
+- `--kmin`, `--kmax`: Forcing wavenumber band (default: 8.0–12.0)
+- `--eps_target`: Target energy injection rate (default: 0.001)
 - `--f_sigma`: Base forcing amplitude (default: 0.02)
 - `--tau_ou`: OU correlation time (default: 0.3)
-- `--eps_smooth`: Exponential smoothing for rescaling (default: 0, try 0.3)
-- `--eps_clip`: Maximum rescale factor per step (default: 10)
+- `--eps_floor`: Floor value to prevent division by tiny values (default: 1.0e-12)
+- `--eps_smooth`: Exponential smoothing for rescaling (default: 0.0)
+- `--eps_clip`: Maximum rescale factor per step (default: 10.0)
 
 ### Time Integration
-- `--t_end`: Total simulation time (default: 50)
+- `--t_end`: Total simulation time (default: 200.0)
 - `--cfl_safety`: CFL safety factor (default: 0.4)
-- `--cfl_max_dt`, `--cfl_min_dt`: Timestep bounds (default: 10⁻², 10⁻⁸)
+- `--cfl_threshold`: CFL threshold to prevent tiny timestep adjustments (default: 0.1)
+- `--cfl_cadence`: Number of iterations between CFL updates (default: 10)
+- `--cfl_max_dt`, `--cfl_min_dt`: Timestep bounds (default: 0.1, 10⁻⁸)
 
 ### Output
 - `--outdir`: Output directory (default: `snapshots`)
@@ -247,7 +250,7 @@ NS2D includes a comprehensive post-processing toolkit for analysing and visualis
 Generate all standard plots automatically:
 
 ```bash
-python scripts/plot_output.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --out ./figures
+python scripts/plot_output.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --outdir ./figures
 ```
 
 This creates:
@@ -259,7 +262,7 @@ This creates:
 ### Compute Statistics
 
 ```bash
-python scripts/compute_statistics.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --t_start 100 --t_end 500 --k_range 20 50
+python scripts/compute_statistics.py --rundir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --t_start 100 --t_end 500 --nu 5e-5 --k_range 20 100
 ```
 
 This computes:
@@ -292,15 +295,19 @@ visualisation.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
 ### Post-Processing Options
 
 **plot_output.py options:**
+- `--rundir PATH`: Path to realisation directory (required)
+- `--outdir PATH`: Output directory for figures (default: ./figures)
 - `--dpi DPI`: Figure resolution (default: 300)
 - `--no_scalars`, `--no_spectra`, `--no_flux`, `--no_snapshots`: Skip specific plots
-- `--spectra_max_curves N`: Number of time curves to overlay
-- `--spectra_loglog`: Use log-log axes
+- `--spectra_max_curves N`: Number of time curves to overlay (default: 6)
+- `--spectra_loglog`: Use log-log axes for spectra plots
 
 **compute_statistics.py options:**
-- `--t_start`, `--t_end`: Time range for statistics
-- `--k_range K_MIN K_MAX`: Wavenumber range for spectral fitting
-- `--output FILE`: Save statistics to file
+- `--rundir PATH`: Path to realisation directory (required)
+- `--t_start`, `--t_end`: Time range for statistics (default: full time range)
+- `--k_range K_MIN K_MAX`: Wavenumber range for spectral slope fitting
+- `--nu VALUE`: Kinematic viscosity for Reynolds number computation
+- `--output FILE`: Save statistics to file (default: print to stdout)
 
 ## Dependencies
 
