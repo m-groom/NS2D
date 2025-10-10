@@ -1,2 +1,344 @@
-# NS2D
-Forced 2-D incompressible Navier-Stokes (velocity-pressure formulation) on a torus with periodic boundary conditions
+# NS2D: 2D Incompressible Navier-Stokes Solver
+
+Forced 2D incompressible Navier-Stokes (velocity-pressure formulation) on a torus with periodic boundary conditions using the [Dedalus](https://dedalus-project.org/) spectral solver framework.
+
+## Features
+
+### Simulation
+- Pseudo-spectral solver using Fourier basis
+- Distributed memory parallelisation via MPI
+- Band-limited white noise or Ornstein-Uhlenbeck forcing with constant-power constraint
+- Diagnostics:
+  - Energy/enstrophy spectra and spectral fluxes
+  - Time series of integrated quantities (energy, enstrophy, palinstrophy, energy budget terms)
+  - Field snapshots (velocity, vorticity, pressure, streamfunction)
+- Multiple independent realisations with reproducible forcing
+
+### Post-Processing
+- Reusable modules for data loading, visualisation, and analysis
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- MPI implementation (e.g., OpenMPI, MPICH)
+- Dedalus v3
+- Standard scientific Python stack (NumPy, h5py, mpi4py)
+
+### Installation
+
+1. Clone this repository:
+```bash
+git clone https://github.com/m-groom/NS2D
+cd NS2D
+```
+
+2. Install dependencies (see [Dependencies](#dependencies) section below):
+```bash
+pip install -r requirements.txt
+```
+
+3. Run a simple test:
+```bash
+python main.py --Nx 256 --Ny 256 --t_end 10
+```
+
+### Basic Usage
+
+**Single-core simulation:**
+```bash
+python main.py --Nx 512 --Ny 512 --nu 1e-4 --t_end 100
+```
+
+**MPI parallel simulation (8 processes):**
+```bash
+mpiexec -n 8 python main.py --Nx 1024 --Ny 1024 --nu 5e-5 --t_end 200
+```
+
+**Custom forcing parameters:**
+```bash
+python main.py \
+    --forcing stochastic \
+    --stoch_type ou \
+    --kmin 25 --kmax 35 \
+    --eps_target 0.01 \
+    --tau_ou 0.3
+```
+
+**Run multiple realisations:**
+```bash
+mpiexec -n 16 python main.py \
+    --n_realisations 5 \
+    --seed 42 \
+    --outdir my_ensemble
+```
+
+**Get help:**
+```bash
+python main.py --help
+```
+
+## Project Structure
+
+```
+NS2D/
+├── README.md                    # This file
+├── requirements.txt             # Python dependencies
+├── setup.py                     # Package installation
+├── main.py                      # Main entry point
+│
+├── examples/                    # Example run scripts
+│   ├── run_basic_simulation.sh
+│   └── run_hpc_ensemble.sh
+│
+├── ns2d/                        # Main simulation package
+│   ├── __init__.py              # Package initialization
+│   ├── config.py                # Configuration and argument parsing
+│   ├── domain.py                # Domain setup and initial conditions
+│   ├── forcing.py               # Stochastic forcing implementations
+│   ├── spectral.py              # Spectral analysis (spectra, fluxes)
+│   ├── solver.py                # Main solver and time integration
+│   └── utils.py                 # MPI utilities and diagnostics
+│
+├── post/                 # Post-processing toolkit
+│   ├── __init__.py              # Package initialization
+│   ├── io.py                    # Data loading utilities
+│   ├── visualization.py         # Plotting functions
+│   └── analysis.py              # Statistical analysis
+│
+└── scripts/                     # Ready-to-use analysis scripts
+    ├── plot_output.py           # Auto-generate all plots
+    └── analyze_statistics.py    # Compute statistics
+```
+
+### Module Overview
+
+**Simulation (ns2d/):**
+- **config.py**: Command-line argument parsing and validation
+- **domain.py**: Domain construction, wavenumber grids, initial conditions
+- **forcing.py**: Band-limited stochastic forcing (white noise, OU process) with constant-power rescaling
+- **spectral.py**: Computation of energy/enstrophy spectra and spectral fluxes
+- **solver.py**: Dedalus problem setup, time integration, output management
+- **utils.py**: MPI field gathering, global diagnostics, Reynolds number computation
+
+**Post-Processing (post/):**
+- **io.py**: Load simulation output (scalars, spectra, fluxes, snapshots)
+- **visualization.py**: Create publication-quality plots
+- **analysis.py**: Compute statistics, spectral slopes, derived quantities
+
+## Physics
+
+The code solves the 2D incompressible Navier-Stokes equations (plus a linear drag term) on a periodic domain [0, Lx] × [0, Ly]:
+
+```
+∂u/∂t + (u·∇)u + ∇p = ν∇²u - αu + f
+∇·u = 0
+```
+
+where:
+- **u** = (u, v): velocity field
+- **p**: pressure
+- **ν**: kinematic viscosity
+- **α**: linear (Ekman) friction coefficient (optional, for large-scale damping)
+- **f**: external forcing
+
+### Forcing
+
+Two stochastic forcing types are supported:
+
+1. **White-in-time**: δ-correlated random forcing
+2. **Ornstein-Uhlenbeck (OU)**: Exponentially correlated forcing with correlation time τ
+
+Both forcing types:
+- Are band-limited to wavenumber shell [kmin, kmax]
+- Enforce incompressibility (∇·f = 0)
+- Use constant-power rescaling to maintain target energy injection rate ε = ⟨u·f⟩
+
+## Configuration
+
+All simulation parameters are controlled via command-line arguments. Key options include:
+
+### Domain & Resolution
+- `--Nx`, `--Ny`: Grid resolution (default: 1024 × 1024)
+- `--Lx`, `--Ly`: Domain size (default: 2π × 2π)
+- `--dealias`: Dealiasing factor (default: 1.5)
+
+### Physics
+- `--nu`: Kinematic viscosity (default: 5×10⁻⁵)
+- `--alpha`: Linear friction coefficient (default: 0.05, use 0 to disable)
+
+### Forcing
+- `--forcing`: `stochastic` or `none` (default: stochastic)
+- `--stoch_type`: `white` or `ou` (default: ou)
+- `--kmin`, `--kmax`: Forcing wavenumber band (default: 25–35)
+- `--eps_target`: Target energy injection rate (default: 0.01)
+- `--f_sigma`: Base forcing amplitude (default: 0.02)
+- `--tau_ou`: OU correlation time (default: 0.3)
+- `--eps_smooth`: Exponential smoothing for rescaling (default: 0, try 0.3)
+- `--eps_clip`: Maximum rescale factor per step (default: 10)
+
+### Time Integration
+- `--t_end`: Total simulation time (default: 50)
+- `--cfl_safety`: CFL safety factor (default: 0.4)
+- `--cfl_max_dt`, `--cfl_min_dt`: Timestep bounds (default: 10⁻², 10⁻⁸)
+
+### Output
+- `--outdir`: Output directory (default: `snapshots`)
+- `--tag`: Optional tag for output directory name
+- `--snap_dt`: Snapshot output interval (default: 1.0)
+- `--scalars_dt`: Scalar time series interval (default: 0.05)
+- `--spectra_dt`: Spectra/flux output interval (default: 0.25)
+
+### Ensemble
+- `--n_realisations`: Number of independent realizations (default: 1)
+- `--seed`: Base random seed (default: 42)
+
+### MPI
+- `--procs_x`, `--procs_y`: 2D process mesh dimensions (default: 0 = auto/1D)
+
+### Miscellaneous
+- `--precision`: `float64` or `float32` (default: float64)
+
+Run `python main.py --help` for the complete list.
+
+## Output
+
+Output is organized by run parameters and realisation, for example:
+
+```
+snapshots/
+└── Nx1024_Ny1024_nu5e-05/
+    ├── realisation_0000/
+    │   ├── snapshots/          # HDF5 snapshots of fields
+    │   ├── scalars/            # HDF5 time series (energy, enstrophy, etc.)
+    │   └── spectra.h5          # Spectra and fluxes at multiple times
+    ├── realisation_0001/
+    └── ...
+```
+
+### Output Files
+
+1. **snapshots/**: Field snapshots (velocity, pressure, vorticity, streamfunction)
+   - Written every `snap_dt` time units
+   - Dedalus HDF5 format (use `h5py` or Dedalus post-processing tools)
+
+2. **scalars/**: Time series of integrated quantities
+   - `energy`: Total kinetic energy E = ½∫|u|² dx
+   - `enstrophy`: Total enstrophy Z = ∫|ω|² dx
+   - `palinstrophy`: Palinstrophy P = ∫|∇ω|² dx
+   - `inj`: Energy injection rate εᵢ = ∫u·f dx
+   - `drag_loss`: Drag dissipation εₐ = α∫|u|² dx
+   - `visc_loss`: Viscous dissipation εᵥ = ν∫|ω|² dx
+   - Written every `scalars_dt` time units
+
+3. **spectra.h5**: Spectral diagnostics
+   - `k_E_Z_t{time}`: Energy spectrum E(k), enstrophy spectrum Z(k)
+   - `flux_T_Pi_t{time}`: Energy transfer T(k) and flux Π(k)
+   - `enstrophy_flux_T_Pi_t{time}`: Enstrophy transfer and flux
+   - Written every `spectra_dt` time units
+
+## Post-Processing
+
+NS2D includes a comprehensive post-processing toolkit for analyzing and visualizing simulation output.
+
+### Quick Start: Visualize Output
+
+Generate all standard plots automatically:
+
+```bash
+python scripts/plot_output.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --out ./figures
+```
+
+This creates:
+- Time series plots (energy, enstrophy, palinstrophy, budget terms)
+- Energy and enstrophy spectra
+- Energy and enstrophy fluxes (transfer and cascade)
+- Field snapshots (vorticity, pressure, streamfunction)
+
+### Compute Statistics
+
+```bash
+python scripts/analyze_statistics.py --run_dir snapshots/Nx1024_Ny1024_nu5e-05/realisation_0000 --t_start 100 --t_end 500 --k_range 20 50
+```
+
+This computes:
+- Time-averaged statistics (mean, std, min, max)
+- Energy balance verification
+- Spectral slopes and power-law fits
+- Integral and Taylor microscales
+- Cascade direction detection
+
+### Custom Analysis
+
+Import the post-processing modules for custom workflows:
+
+```python
+from post import io, visualization, analysis
+
+# Load data
+times, series = io.read_scalars("path/to/scalars/")
+times_s, kbins, Ek_list, Zk_list = io.read_spectra("path/to/spectra.h5")
+
+# Analyze
+E_mean = analysis.time_average(times, series['energy'], t_start=100)
+slope_info = analysis.compute_spectral_slope(kbins, Ek_list[-1], k_range=(20, 50))
+
+# Visualize
+visualization.plot_time_series(times, series, outdir="./plots")
+visualization.plot_spectra(times_s, kbins, Ek_list, Zk_list, outdir="./plots")
+```
+
+### Post-Processing Options
+
+**plot_output.py options:**
+- `--dpi DPI`: Figure resolution (default: 300)
+- `--no_scalars`, `--no_spectra`, `--no_flux`, `--no_snapshots`: Skip specific plots
+- `--spectra_max_curves N`: Number of time curves to overlay
+- `--spectra_loglog`: Use log-log axes
+
+**analyze_statistics.py options:**
+- `--t_start`, `--t_end`: Time range for statistics
+- `--k_range K_MIN K_MAX`: Wavenumber range for spectral fitting
+- `--output FILE`: Save statistics to file
+
+## Dependencies
+
+### Required
+
+- **Python** ≥ 3.8
+- **Dedalus** v3 (spectral PDE solver)
+- **NumPy** (array operations)
+- **h5py** (HDF5 I/O)
+- **mpi4py** (MPI parallelization)
+
+### Post-Processing
+
+- **matplotlib** ≥ 3.3.0 (plotting)
+- **scipy** ≥ 1.6.0 (statistical analysis)
+
+### Installation
+
+The easiest way to install Dedalus is via conda:
+
+```bash
+conda create -n ns2d python=3.11
+conda activate ns2d
+conda install -c conda-forge dedalus
+```
+
+Then install remaining dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+For detailed Dedalus installation instructions, see: https://dedalus-project.readthedocs.io/
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Built with the [Dedalus Project](https://dedalus-project.org/)

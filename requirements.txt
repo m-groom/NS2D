@@ -1,0 +1,17 @@
+# NS2D: 2D Incompressible Navier-Stokes Solver
+# Python dependencies
+
+# Core dependencies
+numpy>=1.20.0
+h5py>=3.0.0
+mpi4py>=3.0.0
+
+# Dedalus spectral solver framework
+# Note: Dedalus v3 is recommended to be installed via conda:
+#   conda install -c conda-forge dedalus
+# If installing via pip, you may need additional system dependencies.
+dedalus>=3.0.0
+
+# Post-processing and visualization dependencies
+matplotlib>=3.3.0
+scipy>=1.6.0
