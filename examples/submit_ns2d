@@ -1,0 +1,19 @@
+#!/bin/bash
+ 
+#SBATCH --account=OD-237006
+ 
+#SBATCH --job-name=NS2D
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=240G
+
+ulimit -s unlimited
+export OMP_NUM_THREADS=1
+export NUMEXPR_MAX_THREADS=1
+export MKL_NUM_THREADS=1
+
+source /home/gro175/dedalus_env.sh
+
+mpirun -np 16 bash run_simulation.sh

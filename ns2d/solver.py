@@ -243,6 +243,7 @@ def setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, r
     snapshots.add_task(p, name="pressure")
     snapshots.add_task(omega_expr, name="vorticity")
     snapshots.add_task(psi, name="streamfunction")
+    snapshots.add_task(forcing_vec, name="forcing")
 
     # Scalar handler (time series)
     scalars = solver.evaluator.add_file_handler(
