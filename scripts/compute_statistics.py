@@ -168,6 +168,25 @@ def main():
             L_int = analysis.compute_integral_scale(kbins, Ek_mean)
             print(f"Integral length scale L_int: {L_int:.5e}")
 
+            # RMS velocity over [t_start, t_end]
+            u_rms = None
+            if "u_rms" in stats:
+                u_rms = stats["u_rms"]["mean"]
+            elif "energy" in stats:
+                # E = 0.5 * <u^2 + v^2> => u_rms = sqrt(2 * E)
+                u_rms = np.sqrt(2.0 * stats["energy"]["mean"])
+
+            if u_rms is not None:
+                print(f"RMS velocity u_rms: {u_rms:.5e}")
+
+            # Geometric-mean length scale sqrt(L_int * L_taylor)
+            if "energy" in stats and "enstrophy" in stats:
+                lambda_t = analysis.compute_taylor_microscale(
+                    stats["enstrophy"]["mean"], stats["energy"]["mean"]
+                )
+                L_geo = np.sqrt(L_int * lambda_t)
+                print(f"Geometric-mean length scale L_geo: {L_geo:.5e}")
+
             # Integral Reynolds number (if viscosity and energy available)
             if args.nu is not None and "energy" in stats:
                 Re_L = analysis.compute_integral_reynolds(L_int, stats["energy"]["mean"], args.nu)
