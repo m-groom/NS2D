@@ -10,6 +10,120 @@ All functions use shell-averaging in Fourier space for isotropic analysis.
 """
 
 import numpy as np
+import dedalus.public as d3
+from mpi4py import MPI
+
+
+def _resolve_bases(u, xbasis, ybasis):
+    """Infer Fourier bases from a Dedalus field when not supplied."""
+
+    if xbasis is not None and ybasis is not None:
+        return xbasis, ybasis
+
+    domain = getattr(u, 'domain', None)
+    bases = getattr(domain, 'bases', None) if domain is not None else None
+    if bases is None or len(bases) < 2:
+        raise ValueError("xbasis and ybasis must be provided for coefficient diagnostics.")
+
+    xb = xbasis or bases[0]
+    yb = ybasis or bases[1]
+    return xb, yb
+
+
+def _resolve_comm(dist, comm):
+    """Choose the communicator used for reductions."""
+
+    if comm is not None:
+        return comm
+    if hasattr(dist, 'comm_cart') and dist.comm_cart is not None:
+        return dist.comm_cart
+    return dist.comm
+
+
+def _resolve_context(u, dist=None, xbasis=None, ybasis=None, comm=None):
+    """Resolve distributor, bases, and communicator from a field."""
+
+    resolved_dist = dist or getattr(u, 'dist', None)
+    if resolved_dist is None:
+        raise ValueError("Dedalus distributor is required for coefficient diagnostics.")
+
+    xb, yb = _resolve_bases(u, xbasis, ybasis)
+    resolved_comm = _resolve_comm(resolved_dist, comm)
+    return resolved_dist, xb, yb, resolved_comm
+
+
+def _prepare_shell_metadata(u, dist, xbasis, ybasis, Lx, Ly):
+    """Compute Parseval weights and shell indices for RealFourier layouts."""
+
+    if abs(Lx - Ly) > 1e-12:
+        raise ValueError("Isotropic shell binning requires Lx ≈ Ly.")
+
+    u.change_scales(1)
+    u.require_coeff_space()
+    coeff_layout = dist.coeff_layout
+    x_slice, y_slice = coeff_layout.slices(u.domain, scales=1)
+
+    step_x = x_slice.step or 1
+    step_y = y_slice.step or 1
+    x_indices = np.arange(x_slice.start, x_slice.stop, step_x, dtype=np.int64)
+    y_indices = np.arange(y_slice.start, y_slice.stop, step_y, dtype=np.int64)
+    nx_index = x_indices // 2
+    ny_index = y_indices // 2
+
+    wx = np.where(nx_index == 0, 1.0, 0.5)
+    wy = np.where(ny_index == 0, 1.0, 0.5)
+    weight = wx[:, None] * wy[None, :]
+
+    NX, NY = np.meshgrid(nx_index, ny_index, indexing='ij')
+    k0 = 2 * np.pi / Lx
+    shell_idx = np.rint(np.sqrt(NX**2 + NY**2)).astype(np.int64)
+
+    return weight, shell_idx, k0
+
+
+def _shell_bincount(comm, shell_idx, values, mmax=None):
+    """Sum *values* over isotropic shells with MPI reduction."""
+
+    if shell_idx.size == 0:
+        local_max = 0
+    else:
+        local_max = int(np.max(shell_idx))
+
+    if mmax is None:
+        if comm is not None:
+            mmax = comm.allreduce(local_max, op=MPI.MAX)
+        else:
+            mmax = local_max
+
+    local_bins = np.bincount(shell_idx.ravel(), weights=values.ravel(), minlength=mmax + 1)
+    if comm is not None:
+        global_bins = np.empty_like(local_bins)
+        comm.Allreduce(local_bins, global_bins, op=MPI.SUM)
+    else:
+        global_bins = local_bins
+
+    return global_bins, mmax
+
+
+def _return_if_root(comm, data):
+    """Return *data* on rank 0 and None elsewhere (if MPI present)."""
+
+    if comm is None or comm.rank == 0:
+        return data
+    return None
+
+
+def _dealias_scale(xbasis, ybasis):
+    """Determine the grid scaling used for dealiasing products."""
+
+    def _scale(val):
+        if isinstance(val, (tuple, list)):
+            return max(float(v) for v in val)
+        return float(val)
+
+    sx = getattr(xbasis, 'dealias', 1.0) or 1.0
+    sy = getattr(ybasis, 'dealias', 1.0) or 1.0
+    return max(1.0, _scale(sx), _scale(sy))
 
 
 def compute_spectra(ux_grid, uy_grid, Lx, Ly):
@@ -46,6 +160,7 @@ def compute_spectra(ux_grid, uy_grid, Lx, Ly):
     uyh = np.fft.rfft2(uy_grid)
 
     # Energy per mode (normalised)
+    area = Lx * Ly
     E_mode = 0.5 * (np.abs(uxh)**2 + np.abs(uyh)**2) / (N * N)
 
     # Vorticity in spectral space
@@ -61,8 +176,8 @@ def compute_spectra(ux_grid, uy_grid, Lx, Ly):
     if Ny % 2 == 0:
         weight[:, -1] = 1.0  # Nyquist is real-valued
 
-    E_mode *= weight
-    Z_mode *= weight
+    E_mode *= weight * area
+    Z_mode *= weight * area
 
     # Shell indices (integer radius in index space)
     ix = np.fft.fftfreq(Nx, d=1.0 / Nx)
@@ -160,7 +275,8 @@ def compute_energy_flux(ux_grid, uy_grid, Lx, Ly):
 
     # Energy transfer per mode: T = Re[û* · N̂]
     T_mode = np.real(np.conj(uxh) * Nxh + np.conj(uyh) * Nyh) / (N * N)
-    T_mode *= weight
+    area = Lx * Ly
+    T_mode *= weight * area
 
     # Shell binning
     ix = np.fft.fftfreq(Nx, d=1.0 / Nx)[:, None]
@@ -249,7 +365,8 @@ def compute_enstrophy_flux(ux_grid, uy_grid, Lx, Ly):
 
     # Per-mode enstrophy transfer: TΩ = Re[ω̂* · N̂ω]
     T_mode = np.real(np.conj(omegah) * Nomegah) / (N * N)
-    T_mode *= weight
+    area = Lx * Ly
+    T_mode *= weight * area
 
     # Shell binning (integer radius in index space)
     ix = np.fft.fftfreq(Nx, d=1.0 / Nx)[:, None]
@@ -262,3 +379,147 @@ def compute_enstrophy_flux(ux_grid, uy_grid, Lx, Ly):
     Pi_shell = -np.cumsum(T_shell)  # Cumulative enstrophy flux
 
     return k_bins, T_shell, Pi_shell
+
+
+def compute_spectra_from_coeffs(u, dist=None, xbasis=None, ybasis=None, Lx=None, Ly=None, comm=None):
+    """
+    Compute spectra directly from distributed RealFourier coefficients.
+
+    Args:
+        u: Dedalus vector field (RealFourier bases)
+        dist: Dedalus distributor (defaults to u.dist)
+        xbasis: x-direction basis (defaults to u.domain.bases[0])
+        ybasis: y-direction basis (defaults to u.domain.bases[1])
+        Lx (float): Domain length in x
+        Ly (float): Domain length in y
+        comm: Optional MPI communicator override
+
+    Returns:
+        tuple or None: (k_bins, E_k, Z_k) on rank 0, None otherwise.
+    """
+
+    if Lx is None or Ly is None:
+        raise ValueError("Lx and Ly must be provided for coefficient spectra.")
+
+    dist, xb, yb, resolved_comm = _resolve_context(u, dist, xbasis, ybasis, comm)
+    weight, shell_idx, k0 = _prepare_shell_metadata(u, dist, xb, yb, Lx, Ly)
+    area = Lx * Ly
+
+    u.change_scales(1)
+    u.require_coeff_space()
+    ux_c = np.asarray(u['c'][0])
+    uy_c = np.asarray(u['c'][1])
+    coeff_sq = np.abs(ux_c)**2 + np.abs(uy_c)**2
+    energy_density = 0.5 * coeff_sq * weight * area
+
+    u.require_grid_space()
+    omega = (-d3.div(d3.skew(u))).evaluate()
+    omega.change_scales(1)
+    omega.require_coeff_space()
+    omega_coeff = np.asarray(omega['c'])
+    enstrophy_density = np.abs(omega_coeff)**2 * weight * area
+
+    Ek, mmax = _shell_bincount(resolved_comm, shell_idx, energy_density)
+    Zk, _ = _shell_bincount(resolved_comm, shell_idx, enstrophy_density, mmax=mmax)
+    k_bins = np.arange(mmax + 1, dtype=np.float64) * k0
+
+    u.require_grid_space()
+    return _return_if_root(resolved_comm, (k_bins, Ek, Zk))
+
+
+def compute_energy_flux_from_coeffs(u, dist=None, xbasis=None, ybasis=None, Lx=None, Ly=None, comm=None):
+    """Compute spectral energy flux using Dedalus coefficient data."""
+
+    if Lx is None or Ly is None:
+        raise ValueError("Lx and Ly must be provided for coefficient flux diagnostics.")
+
+    dist, xb, yb, resolved_comm = _resolve_context(u, dist, xbasis, ybasis, comm)
+    weight, shell_idx, k0 = _prepare_shell_metadata(u, dist, xb, yb, Lx, Ly)
+    area = Lx * Ly
+    scale = _dealias_scale(xb, yb)
+
+    u.change_scales(1)
+    u.require_coeff_space()
+    ux_orig = np.array(u['c'][0], copy=True)
+    uy_orig = np.array(u['c'][1], copy=True)
+
+    if scale > 1.0:
+        u.change_scales(scale)
+    u.require_grid_space()
+    adv = (u @ d3.grad(u)).evaluate()
+    adv.change_scales(scale)
+    adv.require_grid_space()
+
+    u.change_scales(1)
+    adv.change_scales(1)
+    u.require_coeff_space()
+    adv.require_coeff_space()
+
+    u['c'][0] = ux_orig
+    u['c'][1] = uy_orig
+
+    ux_c = ux_orig
+    uy_c = uy_orig
+    advx_c = np.asarray(adv['c'][0])
+    advy_c = np.asarray(adv['c'][1])
+    transfer = np.real(np.conj(ux_c) * advx_c + np.conj(uy_c) * advy_c) * weight * area
+
+    T_shell, mmax = _shell_bincount(resolved_comm, shell_idx, transfer)
+    Pi_shell = -np.cumsum(T_shell)
+    k_bins = np.arange(mmax + 1, dtype=np.float64) * k0
+
+    u.require_grid_space()
+    return _return_if_root(resolved_comm, (k_bins, T_shell, Pi_shell))
+
+
+def compute_enstrophy_flux_from_coeffs(u, dist=None, xbasis=None, ybasis=None, Lx=None, Ly=None, comm=None):
+    """Compute spectral enstrophy flux directly from Dedalus fields."""
+
+    if Lx is None or Ly is None:
+        raise ValueError("Lx and Ly must be provided for coefficient flux diagnostics.")
+
+    dist, xb, yb, resolved_comm = _resolve_context(u, dist, xbasis, ybasis, comm)
+    weight, shell_idx, k0 = _prepare_shell_metadata(u, dist, xb, yb, Lx, Ly)
+    area = Lx * Ly
+    scale = _dealias_scale(xb, yb)
+
+    u.change_scales(1)
+    u.require_coeff_space()
+    ux_orig = np.array(u['c'][0], copy=True)
+    uy_orig = np.array(u['c'][1], copy=True)
+    omega = (-d3.div(d3.skew(u))).evaluate()
+    omega.change_scales(1)
+    omega.require_coeff_space()
+    omega_orig = np.array(omega['c'], copy=True)
+
+    if scale > 1.0:
+        u.change_scales(scale)
+    u.require_grid_space()
+    omega.change_scales(scale)
+    omega.require_grid_space()
+
+    adv_scalar = (u @ d3.grad(omega)).evaluate()
+    adv_scalar.change_scales(scale)
+    adv_scalar.require_grid_space()
+
+    u.change_scales(1)
+    omega.change_scales(1)
+    adv_scalar.change_scales(1)
+    u.require_coeff_space()
+    omega.require_coeff_space()
+    adv_scalar.require_coeff_space()
+
+    u['c'][0] = ux_orig
+    u['c'][1] = uy_orig
+    omega['c'] = omega_orig
+
+    omega_c = omega_orig
+    adv_c = np.asarray(adv_scalar['c'])
+    transfer = np.real(np.conj(omega_c) * adv_c) * weight * area
+
+    T_shell, mmax = _shell_bincount(resolved_comm, shell_idx, transfer)
+    Pi_shell = -np.cumsum(T_shell)
+    k_bins = np.arange(mmax + 1, dtype=np.float64) * k0
+
+    u.require_grid_space()
+    return _return_if_root(resolved_comm, (k_bins, T_shell, Pi_shell))

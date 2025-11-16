@@ -246,9 +246,12 @@ def main():
                 # Tasks to plot and for which to compute global color limits
                 plot_tasks = ["vorticity", "pressure", "streamfunction"]
 
-                # Compute global symmetric color limits across ALL files for consistency
+                # Compute global color limits across ALL files for consistency.
+                # For vorticity and pressure, use robust symmetric limits based on a
+                # high percentile of |field| to reduce the influence of outliers.
                 global_fixed_clims = {}
                 try:
+                    stats = {}  # tname -> dict(data_min, data_max, robust_abs)
                     for snap_h5 in snap_files:
                         with h5py.File(snap_h5, 'r') as f:
                             for tname in plot_tasks:
@@ -257,18 +260,53 @@ def main():
                                     continue
                                 arr = np.asarray(f[ds_key][:])
                                 finite_mask = np.isfinite(arr)
-                                if np.any(finite_mask):
-                                    vmax = float(np.nanmax(np.abs(arr[finite_mask])))
-                                else:
-                                    vmax = 0.0
-                                prev = global_fixed_clims.get(tname, (0.0, 0.0))
-                                prev_abs = max(abs(prev[0]), abs(prev[1]))
-                                if vmax > prev_abs:
-                                    global_fixed_clims[tname] = (-vmax, vmax)
-                    # Fallback to zeros if nothing found
+                                if not np.any(finite_mask):
+                                    continue
+
+                                arr_f = arr[finite_mask]
+                                dmin = float(np.nanmin(arr_f))
+                                dmax = float(np.nanmax(arr_f))
+
+                                # High-percentile absolute value for robust symmetric limits
+                                try:
+                                    q = float(np.nanpercentile(np.abs(arr_f), 99.0))
+                                except Exception:
+                                    q = np.nan
+
+                                s = stats.setdefault(
+                                    tname,
+                                    {"data_min": np.inf, "data_max": -np.inf, "robust_abs": 0.0},
+                                )
+                                s["data_min"] = min(s["data_min"], dmin)
+                                s["data_max"] = max(s["data_max"], dmax)
+                                if np.isfinite(q):
+                                    s["robust_abs"] = max(s["robust_abs"], q)
+
                     for tname in plot_tasks:
-                        if tname not in global_fixed_clims:
+                        s = stats.get(tname)
+                        if s is None:
+                            # Nothing accumulated for this field
                             global_fixed_clims[tname] = (-0.0, 0.0)
+                            continue
+
+                        if tname in ("vorticity", "pressure"):
+                            # Robust symmetric limits
+                            a = s["robust_abs"]
+                            if not np.isfinite(a) or a <= 0.0:
+                                a = max(abs(s["data_min"]), abs(s["data_max"]))
+                            if not np.isfinite(a) or a <= 0.0:
+                                a = 1.0
+                            global_fixed_clims[tname] = (-a, a)
+                        else:
+                            # Streamfunction (or others): use actual min/max
+                            dmin = s["data_min"]
+                            dmax = s["data_max"]
+                            if (not np.isfinite(dmin) or not np.isfinite(dmax)
+                                    or dmin == dmax):
+                                global_fixed_clims[tname] = (-0.0, 0.0)
+                            else:
+                                global_fixed_clims[tname] = (dmin, dmax)
+
                 except Exception as e:
                     print(f"    Warning: could not compute global clims: {e}")
                     global_fixed_clims = {}

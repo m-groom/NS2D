@@ -284,13 +284,15 @@ def setup_spectra_output(run_dir):
     return spectra_file, last_spec_t, spectra_gather_logged
 
 
-def write_spectra(solver, u, comm, args, spectra_file, last_spec_t, logged_flag, r):
+def write_spectra(solver, u, dist, xbasis, ybasis, comm, args, spectra_file, last_spec_t, logged_flag, r):
     """
     Compute and write spectral diagnostics to HDF5.
 
     Args:
         solver: Dedalus solver
         u: Velocity field
+        dist: Dedalus distributor
+        xbasis, ybasis: RealFourier bases
         comm: MPI communicator
         args: Command-line arguments
         spectra_file (Path): Output HDF5 file
@@ -306,34 +308,39 @@ def write_spectra(solver, u, comm, args, spectra_file, last_spec_t, logged_flag,
 
     last_spec_t = solver.sim_time
 
-    # Gather velocity field to rank 0
-    u_grid = utils.gather_field_to_rank0(u, comm, (2, args.Nx, args.Ny))
-    if comm.rank != 0 or u_grid is None:
+    spectra_data = spectral.compute_spectra_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
+    flux_data = spectral.compute_energy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
+    enstrophy_data = spectral.compute_enstrophy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
+
+    if comm.rank != 0:
         return last_spec_t
 
-    # Log success once
+    if spectra_data is None or flux_data is None or enstrophy_data is None:
+        return last_spec_t
+
     if not logged_flag[0]:
-        logger.info("[run %d] Spectra/flux gather successful on %d MPI processes.", r, comm.size)
+        logger.info(
+            "[run %d] Spectra/flux diagnostics computed from coefficient space on %d MPI processes.",
+            r,
+            comm.size,
+        )
         logged_flag[0] = True
 
-    # Compute spectra
-    k_bins, E_k, Z_k = spectral.compute_spectra(u_grid[0], u_grid[1], args.Lx, args.Ly)
+    k_bins, E_k, Z_k = spectra_data
     with h5py.File(spectra_file, "a") as h5:
         dset = f"k_E_Z_t{solver.sim_time:.6f}"
         if dset in h5:
             del h5[dset]
         h5.create_dataset(dset, data=np.vstack([k_bins, E_k, Z_k]).T)
 
-    # Energy flux
-    k_bins2, T_k, Pi_k = spectral.compute_energy_flux(u_grid[0], u_grid[1], args.Lx, args.Ly)
+    k_bins2, T_k, Pi_k = flux_data
     with h5py.File(spectra_file, "a") as h5:
         dname = f"flux_T_Pi_t{solver.sim_time:.6f}"
         if dname in h5:
             del h5[dname]
         h5.create_dataset(dname, data=np.vstack([k_bins2, T_k, Pi_k]).T)
 
-    # Enstrophy flux
-    k_bins_Z, TZ_k, PiZ_k = spectral.compute_enstrophy_flux(u_grid[0], u_grid[1], args.Lx, args.Ly)
+    k_bins_Z, TZ_k, PiZ_k = enstrophy_data
     with h5py.File(spectra_file, "a") as h5:
         dnameZ = f"enstrophy_flux_T_Pi_t{solver.sim_time:.6f}"
         if dnameZ in h5:
@@ -452,7 +459,17 @@ def run_single_realisation(args, r, dtype):
 
             # Write spectra
             last_spec_t = write_spectra(
-                solver, u, comm, args, spectra_file, last_spec_t, spectra_logged, r
+                solver,
+                u,
+                dist,
+                xbasis,
+                ybasis,
+                comm,
+                args,
+                spectra_file,
+                last_spec_t,
+                spectra_logged,
+                r,
             )
 
             # Log progress
