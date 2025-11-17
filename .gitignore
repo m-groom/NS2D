@@ -216,3 +216,6 @@ CLAUDE.md
 
 # Ignore SLURM files
 slurm-*.out
+
+# Ignore HDF5 files
+*.h5

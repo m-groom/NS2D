@@ -12,6 +12,7 @@ constant-power rescaling to maintain a target energy injection rate.
 import numpy as np
 from mpi4py import MPI
 
+from . import spectral
 
 def build_forcing_mask(K, kmin, kmax):
     """
@@ -177,6 +178,157 @@ def stochastic_forcing(Nx, Ny, KX, KY, K, mask, rng, sigma_base, stype="white", 
         fy_grid = np.fft.irfft2(fyh, s=(Nx, Ny))
 
         return fx_grid, fy_grid
+
+    return update
+
+
+def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
+                                   sigma_base, seed=0, stype="white", tau=0.5):
+    """
+    Distributed stochastic forcing that mirrors `stochastic_forcing` statistics.
+    """
+
+    if stype not in ("white", "ou"):
+        raise ValueError(f"Unsupported forcing type '{stype}'")
+    if stype == "ou" and tau <= 0:
+        raise ValueError("tau_ou must be > 0 for OU forcing")
+
+    # Global grid sizes from bases
+    Nx = getattr(xbasis, 'size', None) or getattr(xbasis, 'N')
+    Ny = getattr(ybasis, 'size', None) or getattr(ybasis, 'N')
+    if Nx is None or Ny is None:
+        raise ValueError("Unable to determine basis sizes for distributed forcing")
+
+    # Deduce physical domain lengths from the rFFT wavenumbers KX, KY.
+    # For KX built via domain.wavenumbers: kx[1] = 2π / Lx, ky[1] = 2π / Ly.
+    dkx = float(np.abs(KX[1, 0])) if Nx > 1 else 0.0
+    dky = float(np.abs(KY[0, 1])) if Ny > 1 else 0.0
+    Lx = 2 * np.pi / dkx if dkx > 0 else 1.0
+    Ly = 2 * np.pi / dky if dky > 0 else 1.0
+
+    # Compute the physical wavenumber band [kmin, kmax] implied by the mask.
+    K_mag = np.sqrt(KX * KX + KY * KY)
+    if not np.any(mask):
+        raise ValueError("Forcing mask is empty; no modes to force.")
+    kmin_phys = float(K_mag[mask].min())
+    kmax_phys = float(K_mag[mask].max())
+
+    # Allocate a coefficient-space vector field for the forcing.
+    forcing_field = dist.VectorField(coords, bases=(xbasis, ybasis), name="forcing")
+    forcing_field.require_coeff_space()
+
+    # Local RealFourier mode numbers (integers) for each axis.
+    kx_modes = dist.local_modes(xbasis)
+    ky_modes = dist.local_modes(ybasis)
+
+    # Broadcast mode numbers to match the local coefficient array shape.
+    fx_c = forcing_field['c'][0]
+    fy_c = forcing_field['c'][1]
+    kx_modes_2d = np.broadcast_to(kx_modes, fx_c.shape)
+    ky_modes_2d = np.broadcast_to(ky_modes, fy_c.shape)
+
+    # Physical wavenumbers for each local coefficient (for divergence-free projection).
+    kx_phys_local = (2.0 * np.pi / Lx) * kx_modes_2d
+    ky_phys_local = (2.0 * np.pi / Ly) * ky_modes_2d
+
+    # Choose shell indices whose physical wavenumbers lie in [kmin_phys, kmax_phys].
+    weight_local, shell_idx_local, k0 = spectral._prepare_shell_metadata(
+        forcing_field, dist, xbasis, ybasis, Lx, Ly
+    )
+    # Shell m corresponds to |k| ≈ m * k0.
+    m_min = int(np.ceil(kmin_phys / k0))
+    m_max = int(np.floor(kmax_phys / k0))
+    if m_max < m_min:
+        raise ValueError(
+            f"No RealFourier shells fall in requested band [{kmin_phys}, {kmax_phys}]"
+        )
+
+    mask_local = (shell_idx_local >= m_min) & (shell_idx_local <= m_max)
+    # Exclude the (0,0) mode to preserve zero-mean forcing.
+    mask_local &= ~((kx_modes_2d == 0) & (ky_modes_2d == 0))
+
+    # Effective number of forced modes in RealFourier space
+    M_eff_local = float(np.sum(weight_local[mask_local]))
+    comm = dist.comm
+    M_eff = comm.allreduce(M_eff_local, op=MPI.SUM)
+
+    # For RealFourier coefficients a_k with variance s^2 on forced modes:
+    #   <f^2> ≈ s^2 * sum(weight) = s^2 * M_eff
+    # so choose s such that <f^2> ≈ sigma_base^2.
+    norm = np.sqrt(2.0) * sigma_base / np.sqrt(max(M_eff, 1.0))
+
+    # State for OU process (in coefficient space).
+    state_x = np.zeros_like(fx_c)
+    state_y = np.zeros_like(fy_c)
+
+    # Step counter for time-decorrelated seeds in white/OU forcing.
+    step_counter = np.array([0], dtype=np.int64)
+
+    def update(dt):
+        """Generate one timestep of distributed stochastic forcing."""
+        step_counter[0] += 1
+        dt_safe = max(dt, 1e-12)
+
+        # Work in coefficient space for the forcing field.
+        forcing_field.require_coeff_space()
+        fx_c = forcing_field['c'][0]
+        fy_c = forcing_field['c'][1]
+        fx_c.fill(0.0)
+        fy_c.fill(0.0)
+
+        if stype == "white":
+            # White-in-time forcing: f ~ ξ / sqrt(dt), where ξ ~ N(0, norm^2).
+            scale = norm / np.sqrt(dt_safe)
+
+            # Fill with standard-normal noise in coefficient space using
+            # Dedalus's layout-independent RNG utilities.
+            forcing_field.fill_random(
+                layout='c',
+                seed=int(seed) + int(step_counter[0]),
+                distribution='standard_normal',
+            )
+
+            # Apply scale and mask in RealFourier coefficient space.
+            fx_c *= scale
+            fy_c *= scale
+            fx_c[~mask_local] = 0.0
+            fy_c[~mask_local] = 0.0
+
+            # Project to divergence-free using physical wavenumbers.
+            tmp_x, tmp_y = project_div_free(kx_phys_local, ky_phys_local, fx_c, fy_c)
+            fx_c[...] = tmp_x
+            fy_c[...] = tmp_y
+
+        else:
+            # Ornstein-Uhlenbeck forcing in coefficient space.
+            e = np.exp(-dt_safe / tau)
+            s_ou = norm * np.sqrt(max(0.0, 1.0 - e * e))
+
+            # Generate standard-normal noise for the OU increment.
+            forcing_field.fill_random(
+                layout='c',
+                seed=int(seed) + 10_000_000 + int(step_counter[0]),
+                distribution='standard_normal',
+            )
+            eta_x = forcing_field['c'][0]
+            eta_y = forcing_field['c'][1]
+
+            # Update OU state only on forced modes.
+            state_x[:] = e * state_x
+            state_y[:] = e * state_y
+            state_x[mask_local] += s_ou * eta_x[mask_local]
+            state_y[mask_local] += s_ou * eta_y[mask_local]
+            state_x[~mask_local] = 0.0
+            state_y[~mask_local] = 0.0
+
+            # Project OU state to divergence-free and use as forcing.
+            tmp_x, tmp_y = project_div_free(kx_phys_local, ky_phys_local, state_x, state_y)
+            fx_c[...] = tmp_x
+            fy_c[...] = tmp_y
+
+        # Return VectorField with updated forcing
+        forcing_field.require_grid_space()
+        return forcing_field
 
     return update
 
