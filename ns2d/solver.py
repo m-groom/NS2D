@@ -238,17 +238,27 @@ def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_di
         max_writes=None
     )
 
-    # Energy and enstrophy
+    # Energy, enstrophy and palinstrophy
     E = 0.5 * d3.integ(u @ u)
     Z = d3.integ(omega_expr * omega_expr)
+    P = d3.integ(d3.grad(omega_expr) @ d3.grad(omega_expr))
     scalars.add_task(E, name="energy")
     scalars.add_task(Z, name="enstrophy")
-    scalars.add_task(d3.integ(d3.grad(omega_expr) @ d3.grad(omega_expr)), name="palinstrophy")
+    scalars.add_task(P, name="palinstrophy")
 
     # Energy budget terms
-    scalars.add_task(d3.integ(u @ forcing_vec), name="inj") # ε_i = <u·f>
-    scalars.add_task(2 * args.alpha * E, name="drag_loss")  # ε_α = α <|u|^2>
-    scalars.add_task(args.nu * Z, name="visc_loss")         # ε_ν = ν <ω^2>
+    scalars.add_task(d3.integ(u @ forcing_vec), name="energy_injection")  # ε_i = ∫ u·f
+    scalars.add_task(2 * args.alpha * E,        name="drag_loss")         # ε_α = 2αE = α∫|u|²
+    scalars.add_task(args.nu * Z,               name="visc_loss")         # ε_ν = ν∫ω²
+
+    # Enstrophy budget terms
+    omega_forcing = -d3.div(d3.skew(forcing_vec))   # F = (curl f)_z
+    scalars.add_task(2 * d3.integ(omega_expr * omega_forcing),
+                     name="enstrophy_injection")    # 2∫ ω F
+    scalars.add_task(2 * args.alpha * Z,
+                     name="enstrophy_drag_loss")    # 2α ∫ ω²
+    scalars.add_task(2 * args.nu * P,
+                     name="enstrophy_visc_loss")    # 2ν ∫ |∇ω|²
 
     return {'snapshots': snapshots, 'scalars': scalars}
 
