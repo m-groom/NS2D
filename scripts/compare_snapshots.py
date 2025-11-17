@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Compare snapshot fields between predictions and ground truth in a 2x2 layout.
+Compare snapshot fields between predictions and ground truth in a 2x3 layout.
 
-This script reads vorticity and streamfunction arrays from an npz file
+This script reads velocity (u, v) and pressure arrays from an npz file
 (containing predictions and ground truth) and creates comparison plots in a
-2x2 layout:
-    Top row:    Ground Truth Vorticity | Ground Truth Streamfunction
-    Bottom row: Prediction Vorticity   | Prediction Streamfunction
+2x3 layout:
+    Top row:    Ground Truth u | Ground Truth v | Ground Truth Pressure
+    Bottom row: Prediction u   | Prediction v   | Prediction Pressure
 
 Usage:
     python compare_snapshots.py --pred_path path/to/predictions.npz \\
@@ -69,10 +69,12 @@ def get_args():
                    help="Starting time for time array (for labeling)")
 
     # Color limits
-    ap.add_argument("--vorticity_clim", type=float, default=None,
-                   help="Symmetric color limit for vorticity (auto if not specified)")
-    ap.add_argument("--streamfunction_clim", type=float, default=None,
-                   help="Symmetric color limit for streamfunction (auto if not specified)")
+    ap.add_argument("--u_clim", type=float, default=None,
+                   help="Symmetric color limit for u velocity (auto if not specified)")
+    ap.add_argument("--v_clim", type=float, default=None,
+                   help="Symmetric color limit for v velocity (auto if not specified)")
+    ap.add_argument("--pressure_clim", type=float, default=None,
+                   help="Symmetric color limit for pressure (auto if not specified)")
 
     # Colormap
     ap.add_argument("--cmap", type=str, default="RdBu_r",
@@ -89,99 +91,123 @@ def load_data_from_npz(npz_path):
         npz_path (Path): Path to npz file
 
     Returns:
-        tuple: (pred_vorticity, pred_streamfunction, true_vorticity, true_streamfunction)
+        tuple: (pred_u, pred_v, pred_pressure, true_u, true_v, true_pressure)
             Each is a numpy array of shape (T, Nx, Ny)
     """
     data = np.load(npz_path, allow_pickle=True)
 
     # Load predictions
-    pred_vorticity = data['pred_vorticity']  # (T, Nx, Ny)
-    pred_streamfunction = data['pred_streamfunction']  # (T, Nx, Ny)
+    pred_u = data['pred_velocity_x']  # (T, Nx, Ny)
+    pred_v = data['pred_velocity_y']  # (T, Nx, Ny)
+    pred_pressure = data['pred_pressure']  # (T, Nx, Ny)
 
     # Try to load ground truth from different possible keys
-    truth_keys_vort = ['output_vorticity', 'true_vorticity', 'gt_vorticity']
-    truth_keys_psi = ['output_streamfunction', 'true_streamfunction', 'gt_streamfunction']
+    truth_keys_u = ['output_u', 'true_u', 'gt_u', 'output_velocity_x']
+    truth_keys_v = ['output_v', 'true_v', 'gt_v', 'output_velocity_y']
+    truth_keys_p = ['output_pressure', 'true_pressure', 'gt_pressure', 'output_p', 'true_p', 'gt_p']
 
-    true_vorticity = None
-    true_streamfunction = None
+    true_u = None
+    true_v = None
+    true_pressure = None
 
-    for key in truth_keys_vort:
+    for key in truth_keys_u:
         if key in data:
-            true_vorticity = data[key]
+            true_u = data[key]
             break
 
-    for key in truth_keys_psi:
+    for key in truth_keys_v:
         if key in data:
-            true_streamfunction = data[key]
+            true_v = data[key]
             break
 
-    if true_vorticity is None or true_streamfunction is None:
+    for key in truth_keys_p:
+        if key in data:
+            true_pressure = data[key]
+            break
+
+    if true_u is None or true_v is None or true_pressure is None:
         raise KeyError(
             f"Could not find ground truth data in npz file.\n"
-            f"Looked for vorticity keys: {truth_keys_vort}\n"
-            f"Looked for streamfunction keys: {truth_keys_psi}\n"
+            f"Looked for u keys: {truth_keys_u}\n"
+            f"Looked for v keys: {truth_keys_v}\n"
+            f"Looked for pressure keys: {truth_keys_p}\n"
             f"Available keys: {list(data.keys())}"
         )
 
-    return pred_vorticity, pred_streamfunction, true_vorticity, true_streamfunction
+    return pred_u, pred_v, pred_pressure, true_u, true_v, true_pressure
 
 
-def compute_global_clims(pred_vorticity, pred_streamfunction,
-                         true_vorticity, true_streamfunction,
-                         vorticity_clim=None, streamfunction_clim=None):
+def compute_global_clims(pred_u, pred_v, pred_pressure,
+                         true_u, true_v, true_pressure,
+                         u_clim=None, v_clim=None, pressure_clim=None):
     """
-    Compute global symmetric color limits for consistent visualization.
+    Compute global symmetric color limits for consistent visualisation.
 
     Args:
-        pred_vorticity (ndarray): Prediction vorticity (T, Nx, Ny)
-        pred_streamfunction (ndarray): Prediction streamfunction (T, Nx, Ny)
-        true_vorticity (ndarray): Ground truth vorticity (T, Nx, Ny)
-        true_streamfunction (ndarray): Ground truth streamfunction (T, Nx, Ny)
-        vorticity_clim (float or None): Manual vorticity limit
-        streamfunction_clim (float or None): Manual streamfunction limit
+        pred_u (ndarray): Prediction u velocity (T, Nx, Ny)
+        pred_v (ndarray): Prediction v velocity (T, Nx, Ny)
+        pred_pressure (ndarray): Prediction pressure (T, Nx, Ny)
+        true_u (ndarray): Ground truth u velocity (T, Nx, Ny)
+        true_v (ndarray): Ground truth v velocity (T, Nx, Ny)
+        true_pressure (ndarray): Ground truth pressure (T, Nx, Ny)
+        u_clim (float or None): Manual u velocity limit
+        v_clim (float or None): Manual v velocity limit
+        pressure_clim (float or None): Manual pressure limit
 
     Returns:
-        dict: Color limits {"vorticity": (vmin, vmax), "streamfunction": (vmin, vmax)}
+        dict: Color limits {"u": (vmin, vmax), "v": (vmin, vmax), "pressure": (vmin, vmax)}
     """
     clims = {}
 
-    # Vorticity color limits
-    if vorticity_clim is not None:
-        clims["vorticity"] = (-vorticity_clim, vorticity_clim)
+    # u velocity color limits
+    if u_clim is not None:
+        clims["u"] = (-u_clim, u_clim)
     else:
         # Compute from both datasets
-        vmax_pred = np.nanmax(np.abs(pred_vorticity[np.isfinite(pred_vorticity)]))
-        vmax_truth = np.nanmax(np.abs(true_vorticity[np.isfinite(true_vorticity)]))
-        vmax = max(vmax_pred, vmax_truth)
-        clims["vorticity"] = (-vmax, vmax)
+        umax_pred = np.nanmax(np.abs(pred_u[np.isfinite(pred_u)]))
+        umax_truth = np.nanmax(np.abs(true_u[np.isfinite(true_u)]))
+        umax = max(umax_pred, umax_truth)
+        clims["u"] = (-umax, umax)
 
-    # Streamfunction color limits
-    if streamfunction_clim is not None:
-        clims["streamfunction"] = (-streamfunction_clim, streamfunction_clim)
+    # v velocity color limits
+    if v_clim is not None:
+        clims["v"] = (-v_clim, v_clim)
     else:
         # Compute from both datasets
-        pmax_pred = np.nanmax(np.abs(pred_streamfunction[np.isfinite(pred_streamfunction)]))
-        pmax_truth = np.nanmax(np.abs(true_streamfunction[np.isfinite(true_streamfunction)]))
+        vmax_pred = np.nanmax(np.abs(pred_v[np.isfinite(pred_v)]))
+        vmax_truth = np.nanmax(np.abs(true_v[np.isfinite(true_v)]))
+        vmax = max(vmax_pred, vmax_truth)
+        clims["v"] = (-vmax, vmax)
+
+    # Pressure color limits
+    if pressure_clim is not None:
+        clims["pressure"] = (-pressure_clim, pressure_clim)
+    else:
+        # Compute from both datasets
+        pmax_pred = np.nanmax(np.abs(pred_pressure[np.isfinite(pred_pressure)]))
+        pmax_truth = np.nanmax(np.abs(true_pressure[np.isfinite(true_pressure)]))
         pmax = max(pmax_pred, pmax_truth)
-        clims["streamfunction"] = (-pmax, pmax)
+        clims["pressure"] = (-pmax, pmax)
 
     return clims
 
 
-def plot_snapshot_comparison(pred_vort, pred_psi, true_vort, true_psi,
+def plot_snapshot_comparison(pred_u, pred_v, pred_p, true_u, true_v, true_p,
                              time, clims, cmap, outdir, dpi, snapshot_idx):
     """
-    Create 2x2 comparison plot for a single time snapshot.
+    Create 2x3 comparison plot for a single time snapshot.
 
     Layout:
-        [Ground Truth Vorticity] [Ground Truth Streamfunction]
-        [Prediction Vorticity]   [Prediction Streamfunction]
+        [Ground Truth u] [Ground Truth v] [Ground Truth Pressure]
+        [Prediction u]   [Prediction v]   [Prediction Pressure]
 
     Args:
-        pred_vort (ndarray): Prediction vorticity (Nx, Ny)
-        pred_psi (ndarray): Prediction streamfunction (Nx, Ny)
-        true_vort (ndarray): Ground truth vorticity (Nx, Ny)
-        true_psi (ndarray): Ground truth streamfunction (Nx, Ny)
+        pred_u (ndarray): Prediction u velocity (Nx, Ny)
+        pred_v (ndarray): Prediction v velocity (Nx, Ny)
+        pred_p (ndarray): Prediction pressure (Nx, Ny)
+        true_u (ndarray): Ground truth u velocity (Nx, Ny)
+        true_v (ndarray): Ground truth v velocity (Nx, Ny)
+        true_p (ndarray): Ground truth pressure (Nx, Ny)
         time (float): Simulation time
         clims (dict): Color limits for each field
         cmap (str): Colormap name
@@ -189,27 +215,29 @@ def plot_snapshot_comparison(pred_vort, pred_psi, true_vort, true_psi,
         dpi (int): Figure DPI
         snapshot_idx (int): Snapshot index for filename
     """
-    # Create figure with 2x2 grid
-    fig = plt.figure(figsize=(12, 11))
-    gs = gridspec.GridSpec(2, 2, figure=fig,
-                          hspace=0.35, wspace=0.35,
-                          left=0.08, right=0.92, top=0.93, bottom=0.05)
+    # Create figure with 2x3 grid
+    fig = plt.figure(figsize=(18, 11))
+    gs = gridspec.GridSpec(2, 3, figure=fig,
+                          hspace=0.30, wspace=0.30,
+                          left=0.05, right=0.95, top=0.93, bottom=0.05)
 
     # Titles for each subplot
     titles = [
-        "Ground Truth: Vorticity",
-        "Ground Truth: Streamfunction",
-        "Prediction: Vorticity",
-        "Prediction: Streamfunction"
+        "Ground Truth: u",
+        "Ground Truth: v",
+        "Ground Truth: Pressure",
+        "Prediction: u",
+        "Prediction: v",
+        "Prediction: Pressure"
     ]
 
     # Data for each subplot
-    fields = [true_vort, true_psi, pred_vort, pred_psi]
-    field_names = ["vorticity", "streamfunction", "vorticity", "streamfunction"]
+    fields = [true_u, true_v, true_p, pred_u, pred_v, pred_p]
+    field_names = ["u", "v", "pressure", "u", "v", "pressure"]
 
     # Plot each field
     for idx, (field, field_name, title) in enumerate(zip(fields, field_names, titles)):
-        row, col = divmod(idx, 2)
+        row, col = divmod(idx, 3)
         ax = fig.add_subplot(gs[row, col])
 
         vmin, vmax = clims[field_name]
@@ -256,13 +284,13 @@ def main():
 
     # Load data
     print("\nLoading data from npz file...")
-    pred_vorticity, pred_streamfunction, true_vorticity, true_streamfunction = \
+    pred_u, pred_v, pred_pressure, true_u, true_v, true_pressure = \
         load_data_from_npz(pred_path)
 
-    print(f"Prediction shape: {pred_vorticity.shape}")
-    print(f"Ground truth shape: {true_vorticity.shape}")
+    print(f"Prediction shape: {pred_u.shape}")
+    print(f"Ground truth shape: {true_u.shape}")
 
-    T = pred_vorticity.shape[0]
+    T = pred_u.shape[0]
 
     # Create time array
     times = args.t_start + np.arange(T) * args.dt
@@ -270,12 +298,13 @@ def main():
     # Compute global color limits
     print("\nComputing global color limits...")
     clims = compute_global_clims(
-        pred_vorticity, pred_streamfunction,
-        true_vorticity, true_streamfunction,
-        args.vorticity_clim, args.streamfunction_clim
+        pred_u, pred_v, pred_pressure,
+        true_u, true_v, true_pressure,
+        args.u_clim, args.v_clim, args.pressure_clim
     )
-    print(f"  Vorticity range: [{clims['vorticity'][0]:.3e}, {clims['vorticity'][1]:.3e}]")
-    print(f"  Streamfunction range: [{clims['streamfunction'][0]:.3e}, {clims['streamfunction'][1]:.3e}]")
+    print(f"  u range: [{clims['u'][0]:.3e}, {clims['u'][1]:.3e}]")
+    print(f"  v range: [{clims['v'][0]:.3e}, {clims['v'][1]:.3e}]")
+    print(f"  Pressure range: [{clims['pressure'][0]:.3e}, {clims['pressure'][1]:.3e}]")
 
     # Determine which snapshots to plot
     stride = max(1, args.snap_stride)
@@ -293,10 +322,12 @@ def main():
     # Plot each snapshot with progress bar
     for snap_idx in tqdm(snapshot_indices, desc="Creating comparison plots"):
         plot_snapshot_comparison(
-            pred_vort=pred_vorticity[snap_idx],
-            pred_psi=pred_streamfunction[snap_idx],
-            true_vort=true_vorticity[snap_idx],
-            true_psi=true_streamfunction[snap_idx],
+            pred_u=pred_u[snap_idx],
+            pred_v=pred_v[snap_idx],
+            pred_p=pred_pressure[snap_idx],
+            true_u=true_u[snap_idx],
+            true_v=true_v[snap_idx],
+            true_p=true_pressure[snap_idx],
             time=times[snap_idx],
             clims=clims,
             cmap=args.cmap,
