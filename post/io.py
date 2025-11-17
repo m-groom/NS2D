@@ -59,7 +59,8 @@ def read_scalars(scalars_dir):
     # Required scalars (must be present in all files)
     required_keys = ["energy", "enstrophy", "palinstrophy"]
     # Optional scalars (included if present in all files)
-    optional_keys = ["inj", "drag_loss", "visc_loss"]
+    optional_keys = ["energy_injection", "drag_loss", "visc_loss",
+                     "enstrophy_injection", "enstrophy_drag_loss", "enstrophy_visc_loss"]
 
     times_all = []
     series_req = {k: [] for k in required_keys}

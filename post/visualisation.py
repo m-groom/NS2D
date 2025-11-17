@@ -49,10 +49,14 @@ def plot_time_series(times, series_dict, outdir=".", dpi=300, show_balance=True)
         - energy.png
         - enstrophy.png
         - palinstrophy.png
-        - inj.png (if present)
+        - energy_injection.png (if present)
         - drag_loss.png (if present)
         - visc_loss.png (if present)
-        - energy_balance.png (if all terms present and show_balance=True)
+        - enstrophy_injection.png (if present)
+        - enstrophy_drag_loss.png (if present)
+        - enstrophy_visc_loss.png (if present)
+        - energy_balance.png (if all energy terms present and show_balance=True)
+        - enstrophy_balance.png (if all enstrophy terms present and show_balance=True)
     """
     outdir = pathlib.Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -62,9 +66,12 @@ def plot_time_series(times, series_dict, outdir=".", dpi=300, show_balance=True)
         "energy": {"ylabel": "Energy E", "title": "Kinetic Energy vs Time"},
         "enstrophy": {"ylabel": "Enstrophy Z", "title": "Enstrophy vs Time"},
         "palinstrophy": {"ylabel": "Palinstrophy P", "title": "Palinstrophy vs Time"},
-        "inj": {"ylabel": "ε_inj", "title": "Energy Injection Rate vs Time"},
+        "energy_injection": {"ylabel": "ε_inj", "title": "Energy Injection Rate vs Time"},
         "drag_loss": {"ylabel": "ε_drag", "title": "Drag Dissipation vs Time"},
         "visc_loss": {"ylabel": "ε_visc", "title": "Viscous Dissipation vs Time"},
+        "enstrophy_injection": {"ylabel": "Z_inj", "title": "Enstrophy Injection Rate vs Time"},
+        "enstrophy_drag_loss": {"ylabel": "Z_drag", "title": "Enstrophy Drag Loss vs Time"},
+        "enstrophy_visc_loss": {"ylabel": "Z_visc", "title": "Enstrophy Viscous Loss vs Time"},
     }
 
     for key, spec in plot_specs.items():
@@ -82,8 +89,8 @@ def plot_time_series(times, series_dict, outdir=".", dpi=300, show_balance=True)
         plt.close()
 
     # Energy balance plot
-    if show_balance and all(k in series_dict for k in ["inj", "drag_loss", "visc_loss"]):
-        residual = series_dict["inj"] - series_dict["drag_loss"] - series_dict["visc_loss"]
+    if show_balance and all(k in series_dict for k in ["energy_injection", "drag_loss", "visc_loss"]):
+        residual = series_dict["energy_injection"] - series_dict["drag_loss"] - series_dict["visc_loss"]
 
         plt.figure(figsize=(8, 4.5))
         plt.plot(times, residual, linewidth=1.5, label="Residual")
@@ -95,6 +102,22 @@ def plot_time_series(times, series_dict, outdir=".", dpi=300, show_balance=True)
         plt.legend()
         plt.tight_layout()
         plt.savefig(outdir / "energy_balance.png", dpi=dpi, bbox_inches="tight")
+        plt.close()
+
+    # Enstrophy balance plot
+    if show_balance and all(k in series_dict for k in ["enstrophy_injection", "enstrophy_drag_loss", "enstrophy_visc_loss"]):
+        residual_z = series_dict["enstrophy_injection"] - series_dict["enstrophy_drag_loss"] - series_dict["enstrophy_visc_loss"]
+
+        plt.figure(figsize=(8, 4.5))
+        plt.plot(times, residual_z, linewidth=1.5, label="Residual")
+        plt.axhline(0, color='k', linestyle='--', alpha=0.5)
+        plt.xlabel("Time t")
+        plt.ylabel("Z_inj - Z_drag - Z_visc")
+        plt.title("Enstrophy Balance Residual")
+        plt.grid(True, alpha=0.3, linestyle="--")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(outdir / "enstrophy_balance.png", dpi=dpi, bbox_inches="tight")
         plt.close()
 
 
