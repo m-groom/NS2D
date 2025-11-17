@@ -62,7 +62,7 @@ def setup_problem(u, p, tau_p, forcing_vec, nu, alpha, coords, xbasis, ybasis):
 
 def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     """
-    initialise velocity, pressure, and streamfunction fields.
+    initialise velocity, pressure, and forcing fields.
 
     Creates fields and sets initial conditions by:
     1. Generating random vorticity on rank 0
@@ -88,7 +88,6 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     p = dist.Field(name='p', bases=(xbasis, ybasis))
     tau_p = dist.Field(name='tau_p')
     forcing_vec = dist.VectorField(coords, name='forcing', bases=(xbasis, ybasis))
-    psi = dist.Field(name='psi', bases=(xbasis, ybasis))
 
     # Wavenumber grids
     kx, ky, KX, KY, K2, K = domain.wavenumbers(args.Nx, args.Ny, args.Lx, args.Ly)
@@ -103,23 +102,17 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
             w_hat, KX, KY, K2, args.Nx, args.Ny
         )
         # Convert to requested precision
-        psi0_grid = psi0_grid.astype(dtype, copy=False)
         ux0_grid = ux0_grid.astype(dtype, copy=False)
         uy0_grid = uy0_grid.astype(dtype, copy=False)
     else:
-        psi0_grid = np.empty((args.Nx, args.Ny), dtype=dtype)
         ux0_grid = np.empty((args.Nx, args.Ny), dtype=dtype)
         uy0_grid = np.empty((args.Nx, args.Ny), dtype=dtype)
 
     # Broadcast to all ranks
-    comm.Bcast(psi0_grid, root=0)
     comm.Bcast(ux0_grid, root=0)
     comm.Bcast(uy0_grid, root=0)
 
     # Assign to local slices
-    psi.change_scales(1)
-    psi['g'] = psi0_grid[utils.local_slices(psi)]
-
     u.change_scales(1)
     u_slices = utils.local_slices(u)
     u['g'][0] = ux0_grid[u_slices]
@@ -132,20 +125,22 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
         Re0 = u0_rms * np.sqrt(args.Lx * args.Ly) / args.nu
         logger.info("[run %d] Initial conditions: max|u|=%.3e, Re_box=%.3e", r, u0_max, Re0)
 
-    return u, p, tau_p, forcing_vec, psi, kx, ky, KX, KY, K2, K
+    return u, p, tau_p, forcing_vec, kx, ky, KX, KY, K2, K
 
 
-def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
+def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, comm, forcing_seed):
     """
     Setup forcing function with optional constant-power rescaling.
 
     Args:
         args: Command-line arguments
         forcing_vec: Dedalus forcing vector field
+        coords: Coordinate system
+        dist: Dedalus distributor
+        xbasis, ybasis: RealFourier bases
         KX, KY, K: Wavenumber grids
         comm: MPI communicator
-        rng: Random number generator
-        dtype: Data type for arrays
+        forcing_seed (int): Seed for distributed forcing generator
 
     Returns:
         callable: update_forcing(dt, u) function that updates forcing_vec;
@@ -159,43 +154,35 @@ def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
             forcing_vec['g'][1] = 0.0
         return update_forcing
 
-    # Stochastic forcing setup
     shell_mask = forcing.build_forcing_mask(K, args.kmin, args.kmax)
     stype = "ou" if args.stoch_type == "ou" else "white"
 
-    # Create base forcing generator on rank 0
-    if comm.rank == 0:
-        stoch_update = forcing.stochastic_forcing(
-            args.Nx, args.Ny, KX, KY, K, shell_mask, rng,
-            args.f_sigma, stype=stype, tau=args.tau_ou
-        )
-    else:
-        stoch_update = None
+    stoch_update = forcing.distributed_stochastic_forcing(
+        dist,
+        coords,
+        xbasis,
+        ybasis,
+        KX,
+        KY,
+        shell_mask,
+        sigma_base=args.f_sigma,
+        seed=forcing_seed,
+        stype=stype,
+        tau=args.tau_ou,
+    )
 
     # State for exponential smoothing
     scale_state = np.array([1.0], dtype=np.float64)
 
     def update_forcing(dt, u):
         """Update forcing, optionally applying constant-power rescaling."""
-        # Generate base forcing on rank 0
-        if comm.rank == 0:
-            fx, fy = stoch_update(dt)
-            fx = fx.astype(dtype, copy=False)
-            fy = fy.astype(dtype, copy=False)
-        else:
-            fx = np.empty((args.Nx, args.Ny), dtype=dtype)
-            fy = np.empty((args.Nx, args.Ny), dtype=dtype)
+        forcing_field = stoch_update(dt)
+        forcing_field.require_grid_space()
 
-        # Broadcast to all ranks
-        comm.Bcast(fx, root=0)
-        comm.Bcast(fy, root=0)
-
-        # Extract local slices
         forcing_vec.change_scales(1)
         u.change_scales(1)
-        f_slices = utils.local_slices(forcing_vec)
-        fx_loc = fx[f_slices]
-        fy_loc = fy[f_slices]
+        fx_loc = forcing_field['g'][0]
+        fy_loc = forcing_field['g'][1]
         ux_loc = u['g'][0]
         uy_loc = u['g'][1]
 
@@ -216,7 +203,7 @@ def setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype):
     return update_forcing
 
 
-def setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, run_dir):
+def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_dir):
     """
     Setup Dedalus file handlers for snapshots, scalars, and time series.
 
@@ -224,8 +211,8 @@ def setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, r
         solver: Dedalus solver instance
         u: Velocity field
         p: Pressure field
-        psi: Streamfunction field
         omega_expr: Vorticity expression
+        forcing_vec: Forcing vector field
         args: Command-line arguments
         r (int): Realisation index
         run_dir (Path): Output directory for this realisation
@@ -242,7 +229,6 @@ def setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, r
     snapshots.add_task(u, name="velocity")
     snapshots.add_task(p, name="pressure")
     snapshots.add_task(omega_expr, name="vorticity")
-    snapshots.add_task(psi, name="streamfunction")
     snapshots.add_task(forcing_vec, name="forcing")
 
     # Scalar handler (time series)
@@ -380,7 +366,7 @@ def run_single_realisation(args, r, dtype):
     comm = dist.comm
 
     # Initialise fields
-    u, p, tau_p, forcing_vec, psi, kx, ky, KX, KY, K2, K = initialise_fields(
+    u, p, tau_p, forcing_vec, kx, ky, KX, KY, K2, K = initialise_fields(
         args, dist, coords, xbasis, ybasis, dtype, comm, r
     )
 
@@ -394,19 +380,19 @@ def run_single_realisation(args, r, dtype):
 
     # Setup forcing
     rng = np.random.default_rng(args.seed + r)
-    update_forcing = setup_forcing(args, forcing_vec, KX, KY, K, comm, rng, dtype)
-
-    # Setup streamfunction solver for diagnostics
-    tau_psi = dist.Field(name='tau_psi')
-    omega_expr = -d3.div(d3.skew(u))
-    psi_problem = d3.LBVP([psi, tau_psi], namespace=locals())
-    psi_problem.add_equation("-lap(psi) + tau_psi = omega_expr")
-    psi_problem.add_equation("integ(psi) = 0")
-    psi_solver = psi_problem.build_solver()
-
-    def update_streamfunction():
-        psi_solver.solve()
-        psi.change_scales(1)
+    update_forcing = setup_forcing(
+        args,
+        forcing_vec,
+        coords,
+        dist,
+        xbasis,
+        ybasis,
+        KX,
+        KY,
+        K,
+        comm,
+        args.seed + r,
+    )
 
     # Setup output directories
     tag = (args.tag + "_") if args.tag else ""
@@ -417,7 +403,8 @@ def run_single_realisation(args, r, dtype):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup output handlers
-    handlers = setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, run_dir)
+    omega_expr = -d3.div(d3.skew(u))
+    handlers = setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_dir)
     spectra_file, last_spec_t, next_spec_t, spectra_logged = setup_spectra_output(run_dir, args.spectra_dt)
 
     # CFL controller
@@ -438,9 +425,6 @@ def run_single_realisation(args, r, dtype):
     flow = d3.GlobalFlowProperty(solver, cadence=args.cfl_cadence)
     flow.add_property(np.sqrt(u @ u), name='speed')
 
-    # Initial diagnostics
-    update_streamfunction()
-
     # Main time integration loop
     try:
         if comm.rank == 0:
@@ -455,9 +439,6 @@ def run_single_realisation(args, r, dtype):
 
             # Take timestep
             solver.step(dt)
-
-            # Update diagnostics
-            update_streamfunction()
 
             # Write spectra
             last_spec_t, next_spec_t = write_spectra(
