@@ -267,7 +267,7 @@ def setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, r
     return {'snapshots': snapshots, 'scalars': scalars}
 
 
-def setup_spectra_output(run_dir):
+def setup_spectra_output(run_dir, spectra_dt):
     """
     Create HDF5 file for spectra and flux output.
 
@@ -279,12 +279,13 @@ def setup_spectra_output(run_dir):
     """
     spectra_file = run_dir / "spectra.h5"
     last_spec_t = -1e99
+    next_spec_t = spectra_dt
     spectra_gather_logged = [False]  # Mutable flag for logging
 
-    return spectra_file, last_spec_t, spectra_gather_logged
+    return spectra_file, last_spec_t, next_spec_t, spectra_gather_logged
 
 
-def write_spectra(solver, u, dist, xbasis, ybasis, comm, args, spectra_file, last_spec_t, logged_flag, r):
+def write_spectra(solver, u, dist, xbasis, ybasis, comm, args, spectra_file, last_spec_t, logged_flag, r, next_spec_t):
     """
     Compute and write spectral diagnostics to HDF5.
 
@@ -301,22 +302,23 @@ def write_spectra(solver, u, dist, xbasis, ybasis, comm, args, spectra_file, las
         r (int): Realisation index
 
     Returns:
-        float: Updated last_spec_t
+        tuple: (last_spec_t, next_spec_t)
     """
-    if solver.sim_time - last_spec_t + 1e-12 < args.spectra_dt:
-        return last_spec_t
+    if solver.sim_time + 1e-12 < next_spec_t:
+        return last_spec_t, next_spec_t
 
     last_spec_t = solver.sim_time
+    next_spec_t = last_spec_t + args.spectra_dt
 
     spectra_data = spectral.compute_spectra_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
-    flux_data = spectral.compute_energy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
-    enstrophy_data = spectral.compute_enstrophy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
+    energy_flux_data = spectral.compute_energy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
+    enstrophy_flux_data = spectral.compute_enstrophy_flux_from_coeffs(u, dist, xbasis, ybasis, args.Lx, args.Ly)
 
     if comm.rank != 0:
-        return last_spec_t
+        return last_spec_t, next_spec_t
 
-    if spectra_data is None or flux_data is None or enstrophy_data is None:
-        return last_spec_t
+    if spectra_data is None or energy_flux_data is None or enstrophy_flux_data is None:
+        return last_spec_t, next_spec_t
 
     if not logged_flag[0]:
         logger.info(
@@ -333,21 +335,21 @@ def write_spectra(solver, u, dist, xbasis, ybasis, comm, args, spectra_file, las
             del h5[dset]
         h5.create_dataset(dset, data=np.vstack([k_bins, E_k, Z_k]).T)
 
-    k_bins2, T_k, Pi_k = flux_data
+    k_bins2, T_k, Pi_k = energy_flux_data
     with h5py.File(spectra_file, "a") as h5:
         dname = f"flux_T_Pi_t{solver.sim_time:.6f}"
         if dname in h5:
             del h5[dname]
         h5.create_dataset(dname, data=np.vstack([k_bins2, T_k, Pi_k]).T)
 
-    k_bins_Z, TZ_k, PiZ_k = enstrophy_data
+    k_bins_Z, TZ_k, PiZ_k = enstrophy_flux_data
     with h5py.File(spectra_file, "a") as h5:
         dnameZ = f"enstrophy_flux_T_Pi_t{solver.sim_time:.6f}"
         if dnameZ in h5:
             del h5[dnameZ]
         h5.create_dataset(dnameZ, data=np.vstack([k_bins_Z, TZ_k, PiZ_k]).T)
 
-    return last_spec_t
+    return last_spec_t, next_spec_t
 
 
 def run_single_realisation(args, r, dtype):
@@ -416,7 +418,7 @@ def run_single_realisation(args, r, dtype):
 
     # Setup output handlers
     handlers = setup_output_handlers(solver, u, p, psi, omega_expr, forcing_vec, args, r, run_dir)
-    spectra_file, last_spec_t, spectra_logged = setup_spectra_output(run_dir)
+    spectra_file, last_spec_t, next_spec_t, spectra_logged = setup_spectra_output(run_dir, args.spectra_dt)
 
     # CFL controller
     CFL = d3.CFL(
@@ -458,7 +460,7 @@ def run_single_realisation(args, r, dtype):
             update_streamfunction()
 
             # Write spectra
-            last_spec_t = write_spectra(
+            last_spec_t, next_spec_t = write_spectra(
                 solver,
                 u,
                 dist,
@@ -470,6 +472,7 @@ def run_single_realisation(args, r, dtype):
                 last_spec_t,
                 spectra_logged,
                 r,
+                next_spec_t,
             )
 
             # Log progress

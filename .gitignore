@@ -213,3 +213,6 @@ figures/
 
 # Ignore coding agent files
 CLAUDE.md
+
+# Ignore SLURM files
+slurm-*.out

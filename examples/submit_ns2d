@@ -3,7 +3,7 @@
 #SBATCH --account=OD-237006
  
 #SBATCH --job-name=NS2D
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=16
 #SBATCH --cpus-per-task=1
