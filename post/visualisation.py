@@ -122,7 +122,7 @@ def plot_time_series(times, series_dict, outdir=".", dpi=300, show_balance=True)
 
 
 def plot_spectra(times, kbins, Ek_list, Zk_list, outdir=".", max_curves=6,
-                 loglog=True, k_nyquist=None, dpi=300):
+                 loglog=True, k_nyquist=None, dpi=300, tmin=None, tmax=None):
     """
     Plot energy and enstrophy spectra.
 
@@ -136,6 +136,8 @@ def plot_spectra(times, kbins, Ek_list, Zk_list, outdir=".", max_curves=6,
         loglog (bool): Use log-log axes
         k_nyquist (float or None): Clip at Nyquist wavenumber
         dpi (int): Figure DPI
+        tmin (float or None): Minimum time for selecting curves (None = no lower bound)
+        tmax (float or None): Maximum time for selecting curves (None = no upper bound)
 
     Generates:
         - energy_spectrum.png
@@ -144,8 +146,24 @@ def plot_spectra(times, kbins, Ek_list, Zk_list, outdir=".", max_curves=6,
     outdir = pathlib.Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Select time indices to plot
-    idxs = np.linspace(0, len(times) - 1, num=min(max_curves, len(times)), dtype=int)
+    # Select time indices to plot, optionally restricted to [tmin, tmax]
+    times = np.asarray(times)
+    if tmin is not None or tmax is not None:
+        mask = np.ones_like(times, dtype=bool)
+        if tmin is not None:
+            mask &= times >= tmin
+        if tmax is not None:
+            mask &= times <= tmax
+        candidate_idxs = np.nonzero(mask)[0]
+        if candidate_idxs.size == 0:
+            # Fallback: use full range if no times in requested window
+            candidate_idxs = np.arange(len(times))
+    else:
+        candidate_idxs = np.arange(len(times))
+
+    n_curves = min(max_curves, candidate_idxs.size)
+    idxs = candidate_idxs[np.linspace(0, candidate_idxs.size - 1,
+                                      num=n_curves, dtype=int)]
 
     # Stack spectra
     Ek_stack = np.stack(Ek_list, axis=0)  # (T, M)
@@ -211,7 +229,7 @@ def plot_spectra(times, kbins, Ek_list, Zk_list, outdir=".", max_curves=6,
 
 
 def plot_flux(times, kbins, T_list, Pi_list, outdir=".", flux_type="energy",
-              max_curves=6, k_nyquist=None, dpi=300):
+              max_curves=6, k_nyquist=None, dpi=300, tmin=None, tmax=None):
     """
     Plot spectral transfer and cumulative flux.
 
@@ -225,6 +243,8 @@ def plot_flux(times, kbins, T_list, Pi_list, outdir=".", flux_type="energy",
         max_curves (int): Maximum number of curves to overlay
         k_nyquist (float or None): Clip at Nyquist wavenumber
         dpi (int): Figure DPI
+        tmin (float or None): Minimum time for selecting curves (None = no lower bound)
+        tmax (float or None): Maximum time for selecting curves (None = no upper bound)
 
     Generates:
         - {flux_type}_transfer.png
@@ -233,8 +253,24 @@ def plot_flux(times, kbins, T_list, Pi_list, outdir=".", flux_type="energy",
     outdir = pathlib.Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    # Select time indices
-    idxs = np.linspace(0, len(times) - 1, num=min(max_curves, len(times)), dtype=int)
+    # Select time indices, optionally restricted to [tmin, tmax]
+    times = np.asarray(times)
+    if tmin is not None or tmax is not None:
+        mask = np.ones_like(times, dtype=bool)
+        if tmin is not None:
+            mask &= times >= tmin
+        if tmax is not None:
+            mask &= times <= tmax
+        candidate_idxs = np.nonzero(mask)[0]
+        if candidate_idxs.size == 0:
+            # Fallback: use full range if no times in requested window
+            candidate_idxs = np.arange(len(times))
+    else:
+        candidate_idxs = np.arange(len(times))
+
+    n_curves = min(max_curves, candidate_idxs.size)
+    idxs = candidate_idxs[np.linspace(0, candidate_idxs.size - 1,
+                                      num=n_curves, dtype=int)]
 
     # Stack
     T_stack = np.stack(T_list, axis=0)

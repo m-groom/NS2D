@@ -75,6 +75,10 @@ def get_args():
                    help="Maximum number of time curves to overlay")
     ap.add_argument("--spectra_loglog", action="store_true",
                    help="Use log-log axes for spectra plots")
+    ap.add_argument("--spectra_tmin", type=float, default=None,
+                   help="Minimum simulation time for selecting spectra/flux curves")
+    ap.add_argument("--spectra_tmax", type=float, default=None,
+                   help="Maximum simulation time for selecting spectra/flux curves")
 
     return ap.parse_args()
 
@@ -178,7 +182,9 @@ def main():
                     max_curves=args.spectra_max_curves,
                     loglog=args.spectra_loglog,
                     k_nyquist=k_nyquist,
-                    dpi=args.dpi
+                    dpi=args.dpi,
+                    tmin=args.spectra_tmin,
+                    tmax=args.spectra_tmax
                 )
                 print(f"  Saved to {out_root / 'spectra'}")
 
@@ -204,7 +210,9 @@ def main():
                     flux_type="energy",
                     max_curves=args.spectra_max_curves,
                     k_nyquist=k_nyquist,
-                    dpi=args.dpi
+                    dpi=args.dpi,
+                    tmin=args.spectra_tmin,
+                    tmax=args.spectra_tmax
                 )
                 print(f"  Saved energy flux to {out_root / 'flux'}")
 
@@ -222,7 +230,9 @@ def main():
                     flux_type="enstrophy",
                     max_curves=args.spectra_max_curves,
                     k_nyquist=k_nyquist,
-                    dpi=args.dpi
+                    dpi=args.dpi,
+                    tmin=args.spectra_tmin,
+                    tmax=args.spectra_tmax
                 )
                 print(f"  Saved enstrophy flux to {out_root / 'flux'}")
 
