@@ -236,9 +236,17 @@ def plot_scalar_comparison(times_pred, series_pred, times_truth, series_truth,
         "energy": {"ylabel": "Energy E", "title": "Kinetic Energy vs Time"},
         "enstrophy": {"ylabel": "Enstrophy Z", "title": "Enstrophy vs Time"},
         "palinstrophy": {"ylabel": "Palinstrophy P", "title": "Palinstrophy vs Time"},
-        "visc_loss": {"ylabel": "ε_visc", "title": "Viscous Dissipation vs Time"},
-        "drag_loss": {"ylabel": "ε_drag", "title": "Drag Dissipation vs Time"},
         "Re_lambda": {"ylabel": "Re_λ", "title": "Taylor Reynolds Number vs Time"},
+        # Energy budget terms
+        "energy_injection": {"ylabel": "ε_inj", "title": "Energy Injection Rate vs Time"},
+        "visc_loss": {"ylabel": "ε_visc", "title": "Energy Viscous Loss vs Time"},
+        "drag_loss": {"ylabel": "ε_drag", "title": "Energy Drag Loss vs Time"},
+        "energy_balance": {"ylabel": "ε_balance", "title": "Energy Budget Balance vs Time"},
+        # Enstrophy budget terms
+        "enstrophy_injection": {"ylabel": "Z_inj", "title": "Enstrophy Injection Rate vs Time"},
+        "enstrophy_drag_loss": {"ylabel": "Z_drag", "title": "Enstrophy Drag Loss vs Time"},
+        "enstrophy_visc_loss": {"ylabel": "Z_visc", "title": "Enstrophy Viscous Loss vs Time"},
+        "enstrophy_balance": {"ylabel": "Z_balance", "title": "Enstrophy Budget Balance vs Time"},
     }
 
     # Get common keys

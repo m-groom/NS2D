@@ -3,7 +3,7 @@
 """
 Compute comprehensive NS2D diagnostics from prediction and ground truth data.
 
-This script reads vorticity and streamfunction arrays from an npz file
+This script reads velocity (u, v) and pressure arrays from an npz file
 (containing predictions and ground truth from FNO or similar models) and
 computes all available diagnostics from the post-processing module:
 - Scalar time series: energy, enstrophy, palinstrophy
@@ -30,20 +30,12 @@ import numpy as np
 import h5py
 from tqdm import tqdm
 
-# Add parent directory to path to import ns2d and post modules
-parent_dir = pathlib.Path(__file__).parent.parent
-sys.path.insert(0, str(parent_dir))
+# Add scripts directory to path to import spectral_standalone
+scripts_dir = pathlib.Path(__file__).parent
+sys.path.insert(0, str(scripts_dir))
 
-# Import spectral functions directly to avoid Dedalus dependency
-# We use importlib to bypass the ns2d.__init__.py which imports domain (needs Dedalus)
-import importlib.util
-spec = importlib.util.spec_from_file_location("spectral_module", parent_dir / "ns2d" / "spectral.py")
-spectral_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(spectral_module)
-
-compute_spectra = spectral_module.compute_spectra
-compute_energy_flux = spectral_module.compute_energy_flux
-compute_enstrophy_flux = spectral_module.compute_enstrophy_flux
+# Import standalone spectral functions (NumPy-only, no Dedalus dependency)
+from spectral_standalone import compute_spectra, compute_energy_flux, compute_enstrophy_flux
 
 
 def get_args():
@@ -90,23 +82,23 @@ def get_args():
     return ap.parse_args()
 
 
-def streamfunction_to_velocity(psi_grid, Lx, Ly):
+def velocity_to_vorticity(ux_grid, uy_grid, Lx, Ly):
     """
-    Convert streamfunction to velocity in Fourier domain.
+    Compute vorticity from velocity in Fourier domain.
 
     For 2D incompressible flow:
-        u = ∂ψ/∂y  =>  û = i k_y ψ̂
-        v = -∂ψ/∂x  =>  v̂ = -i k_x ψ̂
+        ω = ∂v/∂x - ∂u/∂y  =>  ω̂ = i k_x v̂ - i k_y û
 
     Args:
-        psi_grid (ndarray): Streamfunction in physical space (Nx, Ny)
+        ux_grid (ndarray): x-velocity in physical space (Nx, Ny)
+        uy_grid (ndarray): y-velocity in physical space (Nx, Ny)
         Lx (float): Domain length in x
         Ly (float): Domain length in y
 
     Returns:
-        tuple: (ux_grid, uy_grid) velocity components in physical space
+        ndarray: Vorticity in physical space (Nx, Ny)
     """
-    Nx, Ny = psi_grid.shape
+    Nx, Ny = ux_grid.shape
 
     # Wavenumber grids for rfft2 layout
     kx = 2 * np.pi * np.fft.fftfreq(Nx, d=Lx / Nx)
@@ -114,22 +106,57 @@ def streamfunction_to_velocity(psi_grid, Lx, Ly):
     KX, KY = np.meshgrid(kx, ky, indexing='ij')
 
     # Transform to spectral space
-    psi_hat = np.fft.rfft2(psi_grid)
+    ux_hat = np.fft.rfft2(ux_grid)
+    uy_hat = np.fft.rfft2(uy_grid)
 
-    # Compute velocity: û = ik_y ψ̂,  v̂ = -ik_x ψ̂
-    ux_hat = 1j * KY * psi_hat
-    uy_hat = -1j * KX * psi_hat
+    # Compute vorticity: ω̂ = i k_x v̂ - i k_y û
+    omega_hat = 1j * KX * uy_hat - 1j * KY * ux_hat
 
     # Transform back to physical space
-    ux_grid = np.fft.irfft2(ux_hat, s=(Nx, Ny))
-    uy_grid = np.fft.irfft2(uy_hat, s=(Nx, Ny))
+    omega_grid = np.fft.irfft2(omega_hat, s=(Nx, Ny))
 
-    return ux_grid, uy_grid
+    return omega_grid
 
 
-def compute_scalar_diagnostics(ux_grid, uy_grid, vorticity_grid, Lx, Ly):
+def compute_forcing_curl(fx_grid, fy_grid, Lx, Ly):
     """
-    Compute scalar diagnostics: energy, enstrophy, palinstrophy.
+    Compute curl of forcing field in Fourier domain.
+
+    For 2D forcing field f = (fx, fy):
+        curl_f = ∂fy/∂x - ∂fx/∂y  =>  curl_f̂ = i k_x f̂_y - i k_y f̂_x
+
+    Args:
+        fx_grid (ndarray): x-component of forcing in physical space (Nx, Ny)
+        fy_grid (ndarray): y-component of forcing in physical space (Nx, Ny)
+        Lx (float): Domain length in x
+        Ly (float): Domain length in y
+
+    Returns:
+        ndarray: Curl of forcing in physical space (Nx, Ny)
+    """
+    Nx, Ny = fx_grid.shape
+
+    # Wavenumber grids for rfft2 layout
+    kx = 2 * np.pi * np.fft.fftfreq(Nx, d=Lx / Nx)
+    ky = 2 * np.pi * np.fft.rfftfreq(Ny, d=Ly / Ny)
+    KX, KY = np.meshgrid(kx, ky, indexing='ij')
+
+    # Transform to spectral space
+    fx_hat = np.fft.rfft2(fx_grid)
+    fy_hat = np.fft.rfft2(fy_grid)
+
+    # Compute curl: curl_f̂ = i k_x f̂_y - i k_y f̂_x
+    curl_hat = 1j * KX * fy_hat - 1j * KY * fx_hat
+
+    # Transform back to physical space
+    curl_grid = np.fft.irfft2(curl_hat, s=(Nx, Ny))
+
+    return curl_grid
+
+
+def compute_scalar_diagnostics(ux_grid, uy_grid, vorticity_grid, Lx, Ly, fx_grid=None, fy_grid=None):
+    """
+    Compute scalar diagnostics: energy, enstrophy, palinstrophy, and injection terms.
 
     Args:
         ux_grid (ndarray): x-velocity (Nx, Ny)
@@ -137,9 +164,12 @@ def compute_scalar_diagnostics(ux_grid, uy_grid, vorticity_grid, Lx, Ly):
         vorticity_grid (ndarray): Vorticity (Nx, Ny)
         Lx (float): Domain length in x
         Ly (float): Domain length in y
+        fx_grid (ndarray, optional): x-component of forcing (Nx, Ny)
+        fy_grid (ndarray, optional): y-component of forcing (Nx, Ny)
 
     Returns:
-        dict: Dictionary with keys 'energy', 'enstrophy', 'palinstrophy'
+        dict: Dictionary with keys 'energy', 'enstrophy', 'palinstrophy',
+              and optionally 'energy_injection', 'enstrophy_injection'
     """
     Nx, Ny = ux_grid.shape
     area = Lx * Ly
@@ -165,47 +195,97 @@ def compute_scalar_diagnostics(ux_grid, uy_grid, vorticity_grid, Lx, Ly):
 
     palinstrophy = np.sum(domega_dx**2 + domega_dy**2) * area / (Nx * Ny)
 
-    return {
+    result = {
         'energy': energy,
         'enstrophy': enstrophy,
         'palinstrophy': palinstrophy
     }
 
+    # Compute injection terms if forcing is provided
+    if fx_grid is not None and fy_grid is not None:
+        # Energy injection: ε_i = ∫ u·f dA
+        energy_injection = np.sum(ux_grid * fx_grid + uy_grid * fy_grid) * area / (Nx * Ny)
 
-def compute_all_diagnostics(vorticity_series, streamfunction_series, times,
-                           Lx, Ly, nu, alpha=0.0, compute_flux=False):
+        # Enstrophy injection: Z_i = 2 ∫ ω·curl(f) dA
+        curl_f = compute_forcing_curl(fx_grid, fy_grid, Lx, Ly)
+        enstrophy_injection = 2.0 * np.sum(vorticity_grid * curl_f) * area / (Nx * Ny)
+
+        result['energy_injection'] = energy_injection
+        result['enstrophy_injection'] = enstrophy_injection
+
+    return result
+
+
+def compute_all_diagnostics(ux_series, uy_series, times,
+                           Lx, Ly, nu, alpha=0.0, compute_flux=False,
+                           fx_series=None, fy_series=None):
     """
     Compute all diagnostics for a time series of fields.
 
     Args:
-        vorticity_series (ndarray): Vorticity fields (T, Nx, Ny)
-        streamfunction_series (ndarray): Streamfunction fields (T, Nx, Ny)
+        ux_series (ndarray): x-velocity fields (T, Nx, Ny)
+        uy_series (ndarray): y-velocity fields (T, Nx, Ny)
         times (ndarray): Time values (T,)
         Lx (float): Domain length in x
         Ly (float): Domain length in y
         nu (float): Kinematic viscosity
         alpha (float): Linear drag coefficient
         compute_flux (bool): Whether to compute spectral fluxes (expensive)
+        fx_series (ndarray, optional): x-forcing fields (T, Nx, Ny)
+        fy_series (ndarray, optional): y-forcing fields (T, Nx, Ny)
+                  Note: forcing at index i is the forcing applied at timestep i-1,
+                  so forcing[i+1] corresponds to the forcing acting on velocity[i]
 
     Returns:
         dict: Dictionary containing all diagnostics
     """
-    T, Nx, Ny = vorticity_series.shape
+    T_original, Nx, Ny = ux_series.shape
+
+    # Check if forcing is provided
+    has_forcing = (fx_series is not None) and (fy_series is not None)
+
+    # Adjust for forcing time offset: forcing[i] is at timestep previous to velocity[i]
+    # So we need forcing[1:] with velocity[:-1] to align them correctly
+    # This gives us T-1 timesteps when forcing is available
+    if has_forcing:
+        T = T_original - 1
+        times_out = times[:-1]
+        ux_series_use = ux_series[:-1]
+        uy_series_use = uy_series[:-1]
+        fx_series_use = fx_series[1:]
+        fy_series_use = fy_series[1:]
+        print(f"Note: Using velocity[:-1] and forcing[1:] to align timesteps (T={T} instead of {T_original})")
+    else:
+        T = T_original
+        times_out = times
+        ux_series_use = ux_series
+        uy_series_use = uy_series
+        fx_series_use = None
+        fy_series_use = None
 
     # Initialize storage
     diagnostics = {
-        'times': times,
+        'times': times_out,
         'energy': np.zeros(T),
         'enstrophy': np.zeros(T),
         'palinstrophy': np.zeros(T),
         'visc_loss': np.zeros(T),
         'drag_loss': np.zeros(T),
+        'enstrophy_drag_loss': np.zeros(T),
+        'enstrophy_visc_loss': np.zeros(T),
         'Re_lambda': np.zeros(T),
         'spectra_times': [],
         'spectra_kbins': None,
         'spectra_Ek': [],
         'spectra_Zk': [],
     }
+
+    # Add injection and balance terms storage if forcing is available
+    if has_forcing:
+        diagnostics['energy_injection'] = np.zeros(T)
+        diagnostics['enstrophy_injection'] = np.zeros(T)
+        diagnostics['energy_balance'] = np.zeros(T)
+        diagnostics['enstrophy_balance'] = np.zeros(T)
 
     if compute_flux:
         diagnostics['flux_energy_times'] = []
@@ -221,21 +301,49 @@ def compute_all_diagnostics(vorticity_series, streamfunction_series, times,
 
     for t_idx in tqdm(range(T)):
         # Get fields at this time
-        psi_grid = streamfunction_series[t_idx]
-        omega_grid = vorticity_series[t_idx]
+        ux_grid = ux_series_use[t_idx]
+        uy_grid = uy_series_use[t_idx]
 
-        # Compute velocity from streamfunction
-        ux_grid, uy_grid = streamfunction_to_velocity(psi_grid, Lx, Ly)
+        # Get forcing if available (already aligned)
+        fx_grid = fx_series_use[t_idx] if has_forcing else None
+        fy_grid = fy_series_use[t_idx] if has_forcing else None
 
-        # Scalar diagnostics
-        scalars = compute_scalar_diagnostics(ux_grid, uy_grid, omega_grid, Lx, Ly)
+        # Compute vorticity from velocity
+        omega_grid = velocity_to_vorticity(ux_grid, uy_grid, Lx, Ly)
+
+        # Scalar diagnostics (including injection terms if forcing is provided)
+        scalars = compute_scalar_diagnostics(ux_grid, uy_grid, omega_grid, Lx, Ly,
+                                            fx_grid=fx_grid, fy_grid=fy_grid)
         diagnostics['energy'][t_idx] = scalars['energy']
         diagnostics['enstrophy'][t_idx] = scalars['enstrophy']
         diagnostics['palinstrophy'][t_idx] = scalars['palinstrophy']
 
-        # Dissipation rates
+        # Energy budget terms
         diagnostics['visc_loss'][t_idx] = nu * scalars['enstrophy']
         diagnostics['drag_loss'][t_idx] = 2 * alpha * scalars['energy']
+
+        # Enstrophy budget terms
+        diagnostics['enstrophy_drag_loss'][t_idx] = 2 * alpha * scalars['enstrophy']
+        diagnostics['enstrophy_visc_loss'][t_idx] = 2 * nu * scalars['palinstrophy']
+
+        # Store injection terms and compute balances if available
+        if has_forcing:
+            diagnostics['energy_injection'][t_idx] = scalars['energy_injection']
+            diagnostics['enstrophy_injection'][t_idx] = scalars['enstrophy_injection']
+
+            # Energy balance: injection - drag_loss - visc_loss
+            diagnostics['energy_balance'][t_idx] = (
+                scalars['energy_injection']
+                - diagnostics['drag_loss'][t_idx]
+                - diagnostics['visc_loss'][t_idx]
+            )
+
+            # Enstrophy balance: injection - drag_loss - visc_loss
+            diagnostics['enstrophy_balance'][t_idx] = (
+                scalars['enstrophy_injection']
+                - diagnostics['enstrophy_drag_loss'][t_idx]
+                - diagnostics['enstrophy_visc_loss'][t_idx]
+            )
 
         # Taylor Reynolds number: Re_λ = u_rms * λ / ν
         # where λ = √(E/Z) and u_rms = √(2E)
@@ -248,7 +356,7 @@ def compute_all_diagnostics(vorticity_series, streamfunction_series, times,
 
         # Spectra (every time step)
         k_bins, Ek, Zk = compute_spectra(ux_grid, uy_grid, Lx, Ly)
-        diagnostics['spectra_times'].append(times[t_idx])
+        diagnostics['spectra_times'].append(times_out[t_idx])
         diagnostics['spectra_Ek'].append(Ek)
         diagnostics['spectra_Zk'].append(Zk)
         if diagnostics['spectra_kbins'] is None:
@@ -258,7 +366,7 @@ def compute_all_diagnostics(vorticity_series, streamfunction_series, times,
         if compute_flux:
             # Energy flux
             k_bins_e, T_e, Pi_e = compute_energy_flux(ux_grid, uy_grid, Lx, Ly)
-            diagnostics['flux_energy_times'].append(times[t_idx])
+            diagnostics['flux_energy_times'].append(times_out[t_idx])
             diagnostics['flux_energy_T'].append(T_e)
             diagnostics['flux_energy_Pi'].append(Pi_e)
             if diagnostics['flux_energy_kbins'] is None:
@@ -266,7 +374,7 @@ def compute_all_diagnostics(vorticity_series, streamfunction_series, times,
 
             # Enstrophy flux
             k_bins_z, T_z, Pi_z = compute_enstrophy_flux(ux_grid, uy_grid, Lx, Ly)
-            diagnostics['flux_enstrophy_times'].append(times[t_idx])
+            diagnostics['flux_enstrophy_times'].append(times_out[t_idx])
             diagnostics['flux_enstrophy_T'].append(T_z)
             diagnostics['flux_enstrophy_Pi'].append(Pi_z)
             if diagnostics['flux_enstrophy_kbins'] is None:
@@ -304,8 +412,24 @@ def save_diagnostics_hdf5(diagnostics, output_path, label=""):
         scalars_grp.create_dataset('energy', data=diagnostics['energy'])
         scalars_grp.create_dataset('enstrophy', data=diagnostics['enstrophy'])
         scalars_grp.create_dataset('palinstrophy', data=diagnostics['palinstrophy'])
+
+        # Energy budget terms
         scalars_grp.create_dataset('visc_loss', data=diagnostics['visc_loss'])
         scalars_grp.create_dataset('drag_loss', data=diagnostics['drag_loss'])
+        if 'energy_injection' in diagnostics:
+            scalars_grp.create_dataset('energy_injection', data=diagnostics['energy_injection'])
+        if 'energy_balance' in diagnostics:
+            scalars_grp.create_dataset('energy_balance', data=diagnostics['energy_balance'])
+
+        # Enstrophy budget terms
+        scalars_grp.create_dataset('enstrophy_drag_loss', data=diagnostics['enstrophy_drag_loss'])
+        scalars_grp.create_dataset('enstrophy_visc_loss', data=diagnostics['enstrophy_visc_loss'])
+        if 'enstrophy_injection' in diagnostics:
+            scalars_grp.create_dataset('enstrophy_injection', data=diagnostics['enstrophy_injection'])
+        if 'enstrophy_balance' in diagnostics:
+            scalars_grp.create_dataset('enstrophy_balance', data=diagnostics['enstrophy_balance'])
+
+        # Other derived quantities
         scalars_grp.create_dataset('Re_lambda', data=diagnostics['Re_lambda'])
 
         # Spectra
@@ -362,13 +486,29 @@ def print_statistics(diagnostics, label=""):
     print(f"{'='*70}")
     print(f"Time range: [{diagnostics['times'][0]:.3f}, {diagnostics['times'][-1]:.3f}]")
     print(f"Number of snapshots: {len(diagnostics['times'])}")
+
     print(f"\nScalar diagnostics (mean ± std):")
     print(f"  Energy:         {np.mean(diagnostics['energy']):.6e} ± {np.std(diagnostics['energy']):.6e}")
     print(f"  Enstrophy:      {np.mean(diagnostics['enstrophy']):.6e} ± {np.std(diagnostics['enstrophy']):.6e}")
     print(f"  Palinstrophy:   {np.mean(diagnostics['palinstrophy']):.6e} ± {np.std(diagnostics['palinstrophy']):.6e}")
+    print(f"  Re_lambda:      {np.mean(diagnostics['Re_lambda']):.2f} ± {np.std(diagnostics['Re_lambda']):.2f}")
+
+    print(f"\nEnergy budget (mean ± std):")
+    if 'energy_injection' in diagnostics:
+        print(f"  Injection:      {np.mean(diagnostics['energy_injection']):.6e} ± {np.std(diagnostics['energy_injection']):.6e}")
     print(f"  Visc loss:      {np.mean(diagnostics['visc_loss']):.6e} ± {np.std(diagnostics['visc_loss']):.6e}")
     print(f"  Drag loss:      {np.mean(diagnostics['drag_loss']):.6e} ± {np.std(diagnostics['drag_loss']):.6e}")
-    print(f"  Re_lambda:      {np.mean(diagnostics['Re_lambda']):.2f} ± {np.std(diagnostics['Re_lambda']):.2f}")
+    if 'energy_balance' in diagnostics:
+        print(f"  Balance:        {np.mean(diagnostics['energy_balance']):.6e} ± {np.std(diagnostics['energy_balance']):.6e}")
+
+    print(f"\nEnstrophy budget (mean ± std):")
+    if 'enstrophy_injection' in diagnostics:
+        print(f"  Injection:      {np.mean(diagnostics['enstrophy_injection']):.6e} ± {np.std(diagnostics['enstrophy_injection']):.6e}")
+    print(f"  Drag loss:      {np.mean(diagnostics['enstrophy_drag_loss']):.6e} ± {np.std(diagnostics['enstrophy_drag_loss']):.6e}")
+    print(f"  Visc loss:      {np.mean(diagnostics['enstrophy_visc_loss']):.6e} ± {np.std(diagnostics['enstrophy_visc_loss']):.6e}")
+    if 'enstrophy_balance' in diagnostics:
+        print(f"  Balance:        {np.mean(diagnostics['enstrophy_balance']):.6e} ± {np.std(diagnostics['enstrophy_balance']):.6e}")
+
     print(f"{'='*70}\n")
 
 
@@ -397,40 +537,76 @@ def main():
     print(f"Available keys: {list(data.keys())}")
 
     # Extract arrays
-    pred_vorticity = data['pred_vorticity']  # (T, Nx, Ny)
-    pred_streamfunction = data['pred_streamfunction']  # (T, Nx, Ny)
+    pred_u = data['pred_velocity_x']  # (T, Nx, Ny)
+    pred_v = data['pred_velocity_y']  # (T, Nx, Ny)
+    pred_pressure = data['pred_pressure']  # (T, Nx, Ny)
 
     # Try to load ground truth from different possible keys
-    truth_keys_vort = ['output_vorticity', 'true_vorticity', 'gt_vorticity']
-    truth_keys_psi = ['output_streamfunction', 'true_streamfunction', 'gt_streamfunction']
+    truth_keys_u = ['output_velocity_x', 'true_u', 'gt_u']
+    truth_keys_v = ['output_velocity_y', 'true_v', 'gt_v']
+    truth_keys_p = ['output_pressure', 'true_pressure', 'gt_pressure', 'output_p', 'true_p', 'gt_p']
 
-    true_vorticity = None
-    true_streamfunction = None
+    true_u = None
+    true_v = None
+    true_pressure = None
 
-    for key in truth_keys_vort:
+    for key in truth_keys_u:
         if key in data:
-            true_vorticity = data[key]
+            true_u = data[key]
             break
 
-    for key in truth_keys_psi:
+    for key in truth_keys_v:
         if key in data:
-            true_streamfunction = data[key]
+            true_v = data[key]
             break
 
-    if true_vorticity is None or true_streamfunction is None:
+    for key in truth_keys_p:
+        if key in data:
+            true_pressure = data[key]
+            break
+
+    if true_u is None or true_v is None or true_pressure is None:
         print("Warning: Could not find ground truth data in npz file")
-        print(f"Looked for vorticity keys: {truth_keys_vort}")
-        print(f"Looked for streamfunction keys: {truth_keys_psi}")
+        print(f"Looked for u keys: {truth_keys_u}")
+        print(f"Looked for v keys: {truth_keys_v}")
+        print(f"Looked for pressure keys: {truth_keys_p}")
         if not args.skip_truth:
             print("Forcing --skip_truth")
             args.skip_truth = True
 
-    print(f"\nPrediction shape: vorticity={pred_vorticity.shape}, streamfunction={pred_streamfunction.shape}")
+    # Try to load forcing data
+    forcing_keys_x = ['input_forcing_x', 'forcing_x', 'fx']
+    forcing_keys_y = ['input_forcing_y', 'forcing_y', 'fy']
+
+    forcing_x = None
+    forcing_y = None
+
+    for key in forcing_keys_x:
+        if key in data:
+            forcing_x = data[key]
+            break
+
+    for key in forcing_keys_y:
+        if key in data:
+            forcing_y = data[key]
+            break
+
+    has_forcing = (forcing_x is not None) and (forcing_y is not None)
+
+    if has_forcing:
+        print(f"\nForcing data found: fx={forcing_x.shape}, fy={forcing_y.shape}")
+    else:
+        print("\nWarning: Could not find forcing data in npz file")
+        print(f"Looked for fx keys: {forcing_keys_x}")
+        print(f"Looked for fy keys: {forcing_keys_y}")
+        print("Energy and enstrophy injection terms will not be computed")
+
+    print(f"\nPrediction shape: u={pred_u.shape}, v={pred_v.shape}, pressure={pred_pressure.shape}")
     if not args.skip_truth:
-        print(f"Ground truth shape: vorticity={true_vorticity.shape}, streamfunction={true_streamfunction.shape}")
+        print(f"Ground truth shape: u={true_u.shape}, v={true_v.shape}, pressure={true_pressure.shape}")
 
     # Create time array
-    T = pred_vorticity.shape[0]
+    T = pred_u.shape[0]
     times = args.t_start + np.arange(T) * args.dt
 
     # Compute diagnostics for predictions
@@ -439,8 +615,10 @@ def main():
         print("Computing diagnostics for PREDICTIONS")
         print("=" * 70)
         pred_diagnostics = compute_all_diagnostics(
-            pred_vorticity, pred_streamfunction, times,
-            args.Lx, args.Ly, args.nu, args.alpha, args.compute_flux
+            pred_u, pred_v, times,
+            args.Lx, args.Ly, args.nu, args.alpha, args.compute_flux,
+            fx_series=forcing_x if has_forcing else None,
+            fy_series=forcing_y if has_forcing else None
         )
         pred_diagnostics['Lx'] = args.Lx
         pred_diagnostics['Ly'] = args.Ly
@@ -460,8 +638,10 @@ def main():
         print("Computing diagnostics for GROUND TRUTH")
         print("=" * 70)
         truth_diagnostics = compute_all_diagnostics(
-            true_vorticity, true_streamfunction, times,
-            args.Lx, args.Ly, args.nu, args.alpha, args.compute_flux
+            true_u, true_v, times,
+            args.Lx, args.Ly, args.nu, args.alpha, args.compute_flux,
+            fx_series=forcing_x if has_forcing else None,
+            fy_series=forcing_y if has_forcing else None
         )
         truth_diagnostics['Lx'] = args.Lx
         truth_diagnostics['Ly'] = args.Ly
@@ -490,20 +670,24 @@ def main():
             print(f"  Enstrophy:  {np.mean(rel_err_enstrophy):.4%} ± {np.std(rel_err_enstrophy):.4%}")
 
             # MSE for fields
-            mse_vorticity = np.mean((pred_vorticity - true_vorticity)**2)
-            mse_streamfunction = np.mean((pred_streamfunction - true_streamfunction)**2)
+            mse_u = np.mean((pred_u - true_u)**2)
+            mse_v = np.mean((pred_v - true_v)**2)
+            mse_pressure = np.mean((pred_pressure - true_pressure)**2)
 
             print(f"\nMSE:")
-            print(f"  Vorticity:       {mse_vorticity:.6e}")
-            print(f"  Streamfunction:  {mse_streamfunction:.6e}")
+            print(f"  u:        {mse_u:.6e}")
+            print(f"  v:        {mse_v:.6e}")
+            print(f"  Pressure: {mse_pressure:.6e}")
 
             # Normalized MSE (divide by variance)
-            norm_mse_vorticity = mse_vorticity / (np.var(true_vorticity) + 1e-16)
-            norm_mse_streamfunction = mse_streamfunction / (np.var(true_streamfunction) + 1e-16)
+            norm_mse_u = mse_u / (np.var(true_u) + 1e-16)
+            norm_mse_v = mse_v / (np.var(true_v) + 1e-16)
+            norm_mse_pressure = mse_pressure / (np.var(true_pressure) + 1e-16)
 
-            print(f"\nNormalized MSE (MSE / variance):")
-            print(f"  Vorticity:       {norm_mse_vorticity:.6e}")
-            print(f"  Streamfunction:  {norm_mse_streamfunction:.6e}")
+            print(f"\nNormalised MSE (MSE / variance):")
+            print(f"  u:        {norm_mse_u:.6e}")
+            print(f"  v:        {norm_mse_v:.6e}")
+            print(f"  Pressure: {norm_mse_pressure:.6e}")
             print("=" * 70)
 
     print("\n" + "=" * 70)
