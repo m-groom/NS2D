@@ -333,6 +333,35 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
     return update
 
 
+def distributed_kolmogorov_forcing(dist, coords, xbasis, ybasis,
+                                   amplitude, k_drive, phase=0.0):
+    """Deterministic Kolmogorov forcing (f_x = F0 sin(k_drive y), f_y = 0).
+
+    The forcing is constructed directly in grid space on each MPI rank using
+    the local y-grid. The returned closure always yields the same forcing
+    field and is therefore inexpensive to evaluate inside the time-stepping
+    loop.
+    """
+
+    forcing_field = dist.VectorField(coords, bases=(xbasis, ybasis), name="forcing")
+    forcing_field.require_grid_space()
+
+    # Local physical grid on this rank
+    _, y = dist.local_grids(xbasis, ybasis)
+
+    dtype = forcing_field['g'][0].dtype
+    fx_local = np.array(amplitude * np.sin(k_drive * y + phase), dtype=dtype, copy=False)
+    fy_local = np.zeros_like(fx_local, dtype=dtype)
+
+    def update():
+        forcing_field.require_grid_space()
+        forcing_field['g'][0] = fx_local
+        forcing_field['g'][1] = fy_local
+        return forcing_field
+
+    return update
+
+
 def constant_power_rescale(fx_loc, fy_loc, ux_loc, uy_loc, comm, Nx, Ny,
                            eps_target, eps_floor=1e-12, eps_clip=10.0,
                            scale_state=None, eps_smooth=0.0):

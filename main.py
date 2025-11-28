@@ -60,8 +60,14 @@ def main():
         logger.info("Domain: %dx%d grid on [0,%.2f]x[0,%.2f]",
                     args.Nx, args.Ny, args.Lx, args.Ly)
         logger.info("Physics: nu=%.2e, alpha=%.2e", args.nu, args.alpha)
-        logger.info("Forcing: %s (kmin=%.1f, kmax=%.1f, eps_target=%.2e)",
-                    args.forcing, args.kmin, args.kmax, args.eps_target)
+        if args.forcing == "stochastic":
+            logger.info("Forcing: %s (kmin=%.1f, kmax=%.1f, eps_target=%.2e)",
+                        args.forcing, args.kmin, args.kmax, args.eps_target)
+        elif args.forcing == "kolmogorov":
+            logger.info("Forcing: %s (F0=%.3f, k_drive=%.2f, phase=%.2f)",
+                        args.forcing, args.kolmogorov_f0, args.k_drive, args.k_phase)
+        else:
+            logger.info("Forcing: %s (disabled)", args.forcing)
         logger.info("Time: t_end=%.2f, CFL safety=%.2f", args.t_end, args.cfl_safety)
         logger.info("Precision: %s", args.precision)
         logger.info("MPI processes: %d", MPI.COMM_WORLD.size)

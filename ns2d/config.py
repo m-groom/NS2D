@@ -72,8 +72,8 @@ def get_args():
     forcing_group = ap.add_argument_group('Forcing Configuration')
     forcing_group.add_argument(
         "--forcing", type=str, default="stochastic",
-        choices=["stochastic", "none"],
-        help="Forcing type: stochastic (band-limited) or none"
+        choices=["stochastic", "kolmogorov", "none"],
+        help="Forcing type: stochastic (band-limited), deterministic Kolmogorov, or none"
     )
     forcing_group.add_argument(
         "--stoch_type", type=str, default="ou",
@@ -95,6 +95,19 @@ def get_args():
     forcing_group.add_argument(
         "--tau_ou", type=float, default=0.3,
         help="Correlation time for OU forcing (ignored for white noise)"
+    )
+
+    forcing_group.add_argument(
+        "--kolmogorov_f0", type=float, default=0.1,
+        help="Amplitude of deterministic Kolmogorov forcing"
+    )
+    forcing_group.add_argument(
+        "--k_drive", type=float, default=4.0,
+        help="Driving wavenumber for Kolmogorov forcing (physical units: rad/length)"
+    )
+    forcing_group.add_argument(
+        "--k_phase", type=float, default=0.0,
+        help="Phase offset for Kolmogorov forcing (radians)"
     )
 
     # Constant-power forcing controls
@@ -174,6 +187,29 @@ def get_args():
         help="Base random seed for initial conditions (each realisation uses seed+r)"
     )
 
+    # Initial conditions
+    ic_group = ap.add_argument_group('Initial Conditions')
+    ic_group.add_argument(
+        "--ic_alpha", type=float, default=49.0,
+        help="Spectral roll-off parameter for initial vorticity"
+    )
+    ic_group.add_argument(
+        "--ic_power", type=float, default=2.5,
+        help="Power-law exponent for initial vorticity spectrum"
+    )
+    ic_group.add_argument(
+        "--ic_scale", type=float, default=7.0 ** 1.5,
+        help="Overall amplitude scaling for initial vorticity"
+    )
+    ic_group.add_argument(
+        "--ic_energy", type=float, default=None,
+        help="Optional target domain-averaged kinetic energy (0.5<|u|^2>) for initial conditions"
+    )
+    ic_group.add_argument(
+        "--ic_seed", type=int, default=None,
+        help="Optional base seed for initial conditions (defaults to --seed if not set)",
+    )
+
     # Output directories and precision
     misc_group = ap.add_argument_group('Miscellaneous')
     misc_group.add_argument(
@@ -233,6 +269,12 @@ def validate_args(args):
         if args.power_mode == "constant" and args.eps_target <= 0:
             raise ValueError("Target injection rate eps_target must be positive when power_mode='constant'")
 
+    if args.forcing == "kolmogorov":
+        if args.kolmogorov_f0 <= 0:
+            raise ValueError("Kolmogorov forcing amplitude kolmogorov_f0 must be positive")
+        if args.k_drive <= 0:
+            raise ValueError("Driving wavenumber k_drive must be positive")
+
     # Check time parameters
     if args.t_end <= 0:
         raise ValueError("End time t_end must be positive")
@@ -246,3 +288,6 @@ def validate_args(args):
 
     if args.n_realisations <= 0:
         raise ValueError("Number of realisations must be positive")
+
+    if args.ic_energy is not None and args.ic_energy <= 0:
+        raise ValueError("ic_energy must be positive when specified")

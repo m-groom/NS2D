@@ -92,12 +92,20 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     # Wavenumber grids
     kx, ky, KX, KY, K2, K = domain.wavenumbers(args.Nx, args.Ny, args.Lx, args.Ly)
 
-    # RNG with realisation-dependent seed
-    rng = np.random.default_rng(args.seed + r)
+    # RNG with realisation-dependent seed (allowing decoupled IC seed)
+    ic_seed_base = args.ic_seed if args.ic_seed is not None else args.seed
+    rng = np.random.default_rng(ic_seed_base + r)
 
     # Generate initial condition on rank 0, then broadcast
     if comm.rank == 0:
-        w_hat = domain.initial_condition(rng, K2, args.Ny)
+        w_hat = domain.initial_condition(
+            rng,
+            K2,
+            args.Ny,
+            alpha=args.ic_alpha,
+            power=args.ic_power,
+            scale=args.ic_scale,
+        )
         ux0_grid, uy0_grid, psi0_grid = domain.vorticity_to_velocity(
             w_hat, KX, KY, K2, args.Nx, args.Ny
         )
@@ -112,6 +120,26 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     comm.Bcast(ux0_grid, root=0)
     comm.Bcast(uy0_grid, root=0)
 
+    # Optionally rescale to a target kinetic energy
+    if args.ic_energy is not None:
+        local_energy = 0.5 * np.sum(ux0_grid**2 + uy0_grid**2, dtype=np.float64)
+        total_energy = comm.allreduce(local_energy, op=MPI.SUM)
+        # domain-averaged kinetic energy 0.5<|u|^2>
+        current_ic_energy = total_energy / (args.Nx * args.Ny)
+        if current_ic_energy > 0:
+            rescale = np.sqrt(args.ic_energy / current_ic_energy)
+            ux0_grid *= rescale
+            uy0_grid *= rescale
+            if comm.rank == 0:
+                logger.info(
+                    "[run %d] Rescaled IC to target energy %.3e (factor %.3e)",
+                    r, args.ic_energy, rescale,
+                )
+        elif comm.rank == 0:
+            logger.warning(
+                "[run %d] Initial conditions had zero energy; skipping IC rescale", r
+            )
+
     # Assign to local slices
     u.change_scales(1)
     u_slices = utils.local_slices(u)
@@ -121,9 +149,14 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     # Log initial diagnostics
     u0_rms = utils.global_rms_u(u, comm, args.Nx, args.Ny)
     if comm.rank == 0:
+        ic_seed_used = ic_seed_base + r
+        E0 = 0.5 * u0_rms * u0_rms
         u0_max = utils.compute_max_velocity(ux0_grid, uy0_grid)
         Re0 = u0_rms * np.sqrt(args.Lx * args.Ly) / args.nu
-        logger.info("[run %d] Initial conditions: max|u|=%.3e, Re_box=%.3e", r, u0_max, Re0)
+        logger.info(
+            "[run %d] Initial conditions (seed=%d): max|u|=%.3e, RMS=%.3e, Re_box=%.3e, E=%.3e",
+            r, ic_seed_used, u0_max, u0_rms, Re0, E0,
+        )
 
     return u, p, tau_p, forcing_vec, kx, ky, KX, KY, K2, K
 
@@ -154,29 +187,43 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
             forcing_vec['g'][1] = 0.0
         return update_forcing
 
-    shell_mask = forcing.build_forcing_mask(K, args.kmin, args.kmax)
-    stype = "ou" if args.stoch_type == "ou" else "white"
+    # Select forcing generator based on requested type
+    if args.forcing == "stochastic":
+        shell_mask = forcing.build_forcing_mask(K, args.kmin, args.kmax)
+        stype = "ou" if args.stoch_type == "ou" else "white"
 
-    stoch_update = forcing.distributed_stochastic_forcing(
-        dist,
-        coords,
-        xbasis,
-        ybasis,
-        KX,
-        KY,
-        shell_mask,
-        sigma_base=args.f_sigma,
-        seed=forcing_seed,
-        stype=stype,
-        tau=args.tau_ou,
-    )
+        generator = forcing.distributed_stochastic_forcing(
+            dist,
+            coords,
+            xbasis,
+            ybasis,
+            KX,
+            KY,
+            shell_mask,
+            sigma_base=args.f_sigma,
+            seed=forcing_seed,
+            stype=stype,
+            tau=args.tau_ou,
+        )
+    elif args.forcing == "kolmogorov":
+        generator = forcing.distributed_kolmogorov_forcing(
+            dist,
+            coords,
+            xbasis,
+            ybasis,
+            amplitude=args.kolmogorov_f0,
+            k_drive=args.k_drive,
+            phase=args.k_phase,
+        )
+    else:
+        raise ValueError(f"Unsupported forcing type {args.forcing}")
 
     # State for exponential smoothing
     scale_state = np.array([1.0], dtype=np.float64)
 
     def update_forcing(dt, u):
         """Update forcing, optionally applying constant-power rescaling."""
-        forcing_field = stoch_update(dt)
+        forcing_field = generator(dt) if args.forcing == "stochastic" else generator()
         forcing_field.require_grid_space()
 
         forcing_vec.change_scales(1)
