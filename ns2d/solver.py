@@ -105,6 +105,11 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
             alpha=args.ic_alpha,
             power=args.ic_power,
             scale=args.ic_scale,
+            KX=KX,
+            KY=KY,
+            Lx=args.Lx,
+            Ly=args.Ly,
+            l_ref=1.0,
         )
         ux0_grid, uy0_grid, psi0_grid = domain.vorticity_to_velocity(
             w_hat, KX, KY, K2, args.Nx, args.Ny
@@ -213,6 +218,8 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
             ybasis,
             amplitude=args.kolmogorov_f0,
             k_drive=args.k_drive,
+            Lx=args.Lx,
+            Ly=args.Ly,
             phase=args.k_phase,
         )
     else:

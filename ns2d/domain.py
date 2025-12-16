@@ -69,13 +69,38 @@ def wavenumbers(Nx, Ny, Lx, Ly):
     return kx, ky, KX, KY, K2, K
 
 
-def initial_condition(rng, K2, Ny, alpha=49.0, power=2.5, scale=7.0**1.5):
+def initial_condition(
+    rng,
+    K2,
+    Ny,
+    alpha=49.0,
+    power=2.5,
+    scale=7.0**1.5,
+    *,
+    KX=None,
+    KY=None,
+    Lx=2.0 * np.pi,
+    Ly=2.0 * np.pi,
+    l_ref=1.0,
+):
     """
     Generate a random initial vorticity field in spectral space.
 
     The initial condition is drawn from a complex Gaussian distribution with
-    variance Var[w_hat(k)] = scale * (|k|² + alpha)^(-power). This produces
-    smooth, energetic initial conditions suitable for turbulence simulations.
+    variance following Li et al. (2021).
+
+        Var[w_hat(k)] = scale * (|k|² + alpha)^(-power).
+
+    The paper defines the covariance using (-Δ + alpha I)^(-power) on a
+    periodic box of length l_ref=1, where the Fourier wavenumbers are
+    k_ref = 2π n / l_ref. If the simulation domain uses lengths (Lx, Ly),
+    the physical wavenumbers are k = 2π n / L. To reproduce the same
+    distribution as the l_ref box, we rescale the wavenumbers as:
+
+        k_ref_x = k_x * (Lx / l_ref),   k_ref_y = k_y * (Ly / l_ref)
+
+    and use |k_ref|² in the covariance. This makes the initial condition
+    statistically consistent with Appendix A.3 even when running on L=2π.
 
     Args:
         rng: NumPy random generator instance
@@ -84,13 +109,33 @@ def initial_condition(rng, K2, Ny, alpha=49.0, power=2.5, scale=7.0**1.5):
         alpha (float): Spectral roll-off parameter (default: 49.0)
         power (float): Power-law exponent for spectrum (default: 2.5)
         scale (float): Overall amplitude scaling (default: 7.0**1.5)
+        KX, KY (ndarray or None): Optional wavenumber grids (same shape as K2).
+            If provided, used for anisotropic rescaling when Lx != Ly.
+        Lx, Ly (float): Domain lengths in x and y (default: 2π, 2π).
+        l_ref (float): Reference box length used in the target covariance
+            (default: 1.0, matching PINO Appendix A.3).
 
     Returns:
         ndarray: Complex vorticity field in spectral space (Nx, Ny//2+1)
             with appropriate rfft reality conditions enforced.
     """
-    # Variance as a function of wavenumber
-    var_k = scale * np.power(K2 + alpha, -power, where=(K2 + alpha) > 0)
+    if l_ref <= 0:
+        raise ValueError("l_ref must be positive")
+    if Lx <= 0 or Ly <= 0:
+        raise ValueError("Lx and Ly must be positive")
+
+    # Use rescaled wavenumbers to match the reference-box covariance.
+    if KX is not None and KY is not None:
+        K2_eff = (KX * (Lx / l_ref)) ** 2 + (KY * (Ly / l_ref)) ** 2
+    else:
+        # If only K2 is given, we can only do an isotropic rescaling. This is
+        # exact when Lx == Ly; otherwise pass KX and KY for correct anisotropy.
+        if not np.isclose(Lx, Ly):
+            raise ValueError("For Lx != Ly, pass KX and KY to initial_condition")
+        K2_eff = K2 * (Lx / l_ref) ** 2
+
+    # Variance as a function of (rescaled) wavenumber
+    var_k = scale * np.power(K2_eff + alpha, -power, where=(K2_eff + alpha) > 0)
     var_k = np.maximum(var_k, 0.0)
 
     # Draw complex Gaussian samples

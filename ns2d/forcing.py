@@ -334,24 +334,66 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
 
 
 def distributed_kolmogorov_forcing(dist, coords, xbasis, ybasis,
-                                   amplitude, k_drive, phase=0.0):
-    """Deterministic Kolmogorov forcing (f_x = F0 sin(k_drive y), f_y = 0).
+                                   amplitude, k_drive, Lx, Ly, phase=0.0,
+                                   x0=0.0, y0=0.0):
+    r"""
+    Deterministic forcing matching Appendix A.3 of Li et al. (2021).
 
-    The forcing is constructed directly in grid space on each MPI rank using
-    the local y-grid. The returned closure always yields the same forcing
-    field and is therefore inexpensive to evaluate inside the time-stepping
-    loop.
+    The paper specifies a fixed scalar vorticity forcing
+
+        f(x) = A ( sin(2π(x₁ + x₂)) + cos(2π(x₁ + x₂)) )
+
+    on a periodic box of side length l=1 (with coordinates x₁, x₂ ∈ [0, 1]).
+
+    This solver evolves the velocity equation with a vector body force.
+    To match the paper, we construct a divergence-free vector forcing `F` whose
+    curl equals the target scalar forcing:
+
+        curl(F) = f(x)
+
+    We do this by defining a scalar potential ψ such that -Δψ = f and setting
+
+        F = ∇⊥ ψ = (∂y ψ, -∂x ψ),
+
+    which is automatically divergence-free and satisfies curl(F) = -Δψ.
+
+    Args:
+      - Lx, Ly: Domain lengths in x and y (must match the simulation domain).
+      - x0, y0: Domain origin offsets (defaults to 0.0 for [0, L] domains).
+
+    Notes:
+      - To reproduce the paper exactly on the default domain [0, 2π]², use
+        `amplitude=0.1`, `k_drive=1`, `phase=0`. (Then 2π(x₁+x₂) becomes x+y.)
+      - `k_drive` scales the diagonal mode number in the normalized coordinates.
     """
 
     forcing_field = dist.VectorField(coords, bases=(xbasis, ybasis), name="forcing")
     forcing_field.require_grid_space()
 
     # Local physical grid on this rank
-    _, y = dist.local_grids(xbasis, ybasis)
+    x, y = dist.local_grids(xbasis, ybasis)
+
+    # Normalized coordinates x1,x2 in [0,1] corresponding to paper notation.
+    x1 = (x - x0) / Lx
+    x2 = (y - y0) / Ly
+
+    # θ = 2π * k_drive * (x1 + x2) + phase
+    theta = (2.0 * np.pi * k_drive) * (x1 + x2) + phase
+
+    # Physical wavenumbers associated with θ
+    kx = (2.0 * np.pi * k_drive) / Lx
+    ky = (2.0 * np.pi * k_drive) / Ly
+    k2 = kx * kx + ky * ky
 
     dtype = forcing_field['g'][0].dtype
-    fx_local = np.array(amplitude * np.sin(k_drive * y + phase), dtype=dtype, copy=False)
-    fy_local = np.zeros_like(fx_local, dtype=dtype)
+    # ψ chosen so that -Δψ = amplitude*(sin(theta)+cos(theta))
+    # For a single Fourier mode, -Δ(sin θ) = k2 sin θ and -Δ(cos θ) = k2 cos θ.
+    # psi = (amplitude / k2) * (np.sin(theta) + np.cos(theta))
+
+    # F = ∇⊥ψ = (∂yψ, -∂xψ) computed analytically
+    dpsi_dtheta = (amplitude / k2) * (np.cos(theta) - np.sin(theta))
+    fx_local = np.array(dpsi_dtheta * ky, dtype=dtype, copy=False)      # ∂yψ
+    fy_local = np.array(-dpsi_dtheta * kx, dtype=dtype, copy=False)     # -∂xψ
 
     def update():
         forcing_field.require_grid_space()

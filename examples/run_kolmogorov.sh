@@ -23,18 +23,19 @@ LY=6.283185307179586  # 2*pi
 
 # Physics
 NU=5e-4
-ALPHA=0.025
+ALPHA=1e-8
 
 # Kolmogorov forcing (f_x = F0 * sin(k_drive * y + phase), f_y = 0)
 FORCING_TYPE="kolmogorov"
 KOLMOGOROV_F0=0.1
-K_DRIVE=4.0
+K_DRIVE=1.0
 K_PHASE=0.0
+POWER_MODE="sigma"
 
 # Initial-condition spectrum (controls amplitude/realisations)
 IC_ALPHA=49.0
 IC_POWER=2.5
-IC_SCALE=18.520259177452136  # 7**1.5; increase/decrease to adjust IC energy
+IC_SCALE=18.520259177452132  # 7**1.5; increase/decrease to adjust IC energy
 # Optional: pin the initial kinetic energy (domain-average 0.5<|u|^2>) so that
 # different seeds give comparable amplitudes. Leave empty to skip rescaling.
 IC_ENERGY=""
@@ -47,9 +48,9 @@ CFL_SAFETY=0.4
 CFL_MAX_DT=1e-2
 
 # Output
-OUTDIR="./kolmogorov_runs"
-SNAP_DT=0.5
-SPECTRA_DT=0.2
+OUTDIR="./kolmogorov"
+SNAP_DT=0.2
+SPECTRA_DT=0.1
 SCALARS_DT=0.05
 N_REALISATIONS=1
 
@@ -72,6 +73,7 @@ python ../main.py \
     --ic_alpha $IC_ALPHA \
     --ic_power $IC_POWER \
     --ic_scale $IC_SCALE \
+    --power_mode $POWER_MODE \
     --t_end $T_END \
     --cfl_safety $CFL_SAFETY \
     --cfl_max_dt $CFL_MAX_DT \
