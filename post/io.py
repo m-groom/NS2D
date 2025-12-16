@@ -254,7 +254,9 @@ def list_snapshot_tasks(snapshot_path):
         list: List of available task names
     """
     with h5py.File(snapshot_path, "r") as f:
-        return [k.replace("tasks/", "") for k in f.keys() if k.startswith("tasks/")]
+        if "tasks" in f:
+            return list(f["tasks"].keys())
+        return []
 
 
 def get_snapshot_info(snapshot_path):

@@ -345,10 +345,10 @@ def main():
                         bar_width = 30
 
                         for pos, idx in enumerate(idx_list, start=1):
-                            visualisation.plot_snapshot(
+                            visualisation.plot_custom_snapshot(
                                 snap_h5,
                                 write_index=idx,
-                                tasks=plot_tasks,
+                                # tasks=plot_tasks,
                                 outdir=subdir,
                                 dpi=args.dpi,
                                 clims=global_fixed_clims

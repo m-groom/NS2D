@@ -13,6 +13,8 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from dedalus.extras import plot_tools
+import h5py
+from . import io
 
 # Use non-interactive backend by default for batch processing
 matplotlib.use("Agg")
@@ -340,9 +342,6 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300,
         - snapshot_write_{write_number:06d}.png
     """
 
-    import h5py
-    from . import io
-
     outdir = pathlib.Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -422,3 +421,138 @@ def plot_snapshot(snapshot_path, write_index=0, tasks=None, outdir=".", dpi=300,
         fig.savefig(str(outdir / savename), dpi=dpi, bbox_inches="tight")
 
     plt.close(fig)
+
+
+def plot_custom_snapshot(snapshot_path, write_index=0, outdir=".", dpi=300, clims=None):
+    """
+    Custom 2-panel snapshot plotter: Vorticity | Pressure + Velocity Vectors.
+    """
+    
+    outdir = pathlib.Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Setup 1x2 grid
+    nrows, ncols = 1, 2
+    scale = 2.5
+    image = plot_tools.Box(1, 1)
+    pad = plot_tools.Frame(0.2, 0.02, 0.1, 0.0)
+    margin = plot_tools.Frame(0.2, 0.1, 0.0, 0.0)
+
+    mfig = plot_tools.MultiFigure(nrows, ncols, image, pad, margin, scale)
+    fig = mfig.figure
+
+    with h5py.File(snapshot_path, "r") as f:
+        times = np.array(f["scales/sim_time"])
+        writes = np.array(f["scales/write_number"])
+
+        if write_index >= len(times):
+            raise IndexError(f"Write index {write_index} out of range")
+
+        # 1. Vorticity
+        ax_vort = mfig.add_axes(0, 0, [0, 0, 1, 1])
+        if "tasks/vorticity" in f:
+            dset_vort = f["tasks/vorticity"]
+            vort_data = np.array(dset_vort[write_index, :, :])
+            
+            vmin_v, vmax_v = None, None
+            if clims and "vorticity" in clims:
+                vmin_v, vmax_v = clims["vorticity"]
+                
+            im_v = ax_vort.imshow(vort_data.T, origin='lower', cmap='RdBu_r', 
+                                  vmin=vmin_v, vmax=vmax_v, interpolation='nearest')
+            # Add colorbar
+            cbar_v = plt.colorbar(im_v, ax=ax_vort, orientation='horizontal', 
+                                  fraction=0.05, pad=0.05, aspect=30)
+            cbar_v.ax.tick_params(labelsize=8)
+        else:
+            ax_vort.text(0.5, 0.5, "Vorticity missing", ha='center', va='center')
+            
+        ax_vort.set_title("Vorticity")
+        ax_vort.axis('off')
+
+        # 2. Pressure + Velocity
+        ax_pres = mfig.add_axes(0, 1, [0, 0, 1, 1])
+        if "tasks/pressure" in f:
+            dset_pres = f["tasks/pressure"]
+            pres_data = np.array(dset_pres[write_index, :, :])
+            
+            vmin_p, vmax_p = None, None
+            if clims and "pressure" in clims:
+                vmin_p, vmax_p = clims["pressure"]
+
+            im_p = ax_pres.imshow(pres_data.T, origin='lower', cmap='RdBu_r',
+                                  vmin=vmin_p, vmax=vmax_p, interpolation='nearest')
+            # Add colorbar
+            cbar_p = plt.colorbar(im_p, ax=ax_pres, orientation='horizontal', 
+                                  fraction=0.05, pad=0.05, aspect=30)
+            cbar_p.ax.tick_params(labelsize=8)
+        else:
+            ax_pres.text(0.5, 0.5, "Pressure missing", ha='center', va='center')
+            
+        ax_pres.set_title("Pressure")
+        ax_pres.axis('off')
+        
+        # Overlay Velocity Quiver
+        if "tasks/velocity" in f:
+            dset_vel = f["tasks/velocity"]
+            # shape (t, 2, x, y) based on check
+            vel_data = np.array(dset_vel[write_index, :, :, :]) # (2, x, y)
+            
+            ux = vel_data[0, :, :].T # Transpose to (y, x) for imshow/quiver consistency with T above
+            uy = vel_data[1, :, :].T
+            
+            
+            # Downsample for quiver
+            stride = 32  # Stride for less cluttered arrows
+            
+            def _interior_indices(size, step):
+                if size <= 2:
+                    return np.array([], dtype=int)
+                offset = max(1, step // 2)
+                max_idx = size - 1 - offset
+                if offset > max_idx:
+                    return np.arange(1, size - 1)
+                idx = np.arange(offset, max_idx + 1, step, dtype=int)
+                if idx.size == 0 or idx[-1] != max_idx:
+                    idx = np.append(idx, max_idx)
+                return idx
+            
+            ny, nx = uy.shape
+            y_idx = _interior_indices(ny, stride)
+            x_idx = _interior_indices(nx, stride)
+            
+            if y_idx.size > 0 and x_idx.size > 0:
+                Xg, Yg = np.meshgrid(x_idx, y_idx) 
+                
+                U = ux[np.ix_(y_idx, x_idx)]
+                V = uy[np.ix_(y_idx, x_idx)]
+            
+                # Auto-scale: aim for 95th percentile arrow ~ half the sampling stride
+                mag = np.sqrt(U**2 + V**2)
+                if mag.size > 0:
+                    mrob = np.percentile(mag, 95)
+                    if mrob > 0:
+                        target = max(1.0, 0.5 * stride)
+                        scale_val = mrob / target
+                    else:
+                        scale_val = None
+                else:
+                    scale_val = None
+                    
+                ax_pres.quiver(
+                    Xg, Yg, U, V,
+                    color='k', alpha=0.6, pivot='mid',
+                    angles='xy', scale_units='xy', scale=scale_val,
+                    width=0.003
+                )
+
+        # Title
+        tstr = f"t = {times[write_index]:.3f}"
+        title_height = 1 - 0.5 * mfig.margin.top / mfig.fig.y
+        fig.suptitle(tstr, x=0.5, y=title_height, ha="center")
+
+        # Save
+        savename = f"snapshot_{int(writes[write_index]):06d}.png"
+        fig.savefig(str(outdir / savename), dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
