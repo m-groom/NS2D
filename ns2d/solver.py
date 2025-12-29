@@ -710,9 +710,18 @@ def run_single_realisation(args, r, dtype):
     flow = d3.GlobalFlowProperty(solver, cadence=args.cfl_cadence)
     flow.add_property(np.sqrt(u @ u), name='speed')
 
-    # Track checkpoint timing for auxiliary state saving
-    last_checkpoint_t = solver.sim_time if restart_mode else -1e99
-    next_checkpoint_t = last_checkpoint_t + args.checkpoint_dt
+    # Track next checkpoint time for auxiliary state saving
+    # We save auxiliary state BEFORE update_forcing when sim_time reaches a checkpoint time
+    # This ensures the forcing state matches what Dedalus will save in the checkpoint
+    if restart_mode:
+        # After restart, next checkpoint will be at the next multiple of checkpoint_dt
+        # Use ceiling to find next checkpoint time after current sim_time
+        next_aux_checkpoint_time = (
+            np.ceil(solver.sim_time / args.checkpoint_dt + 1e-10) * args.checkpoint_dt
+        )
+    else:
+        # Fresh start: first checkpoint at t=0
+        next_aux_checkpoint_time = 0.0
 
     # Main time integration loop
     try:
@@ -726,17 +735,19 @@ def run_single_realisation(args, r, dtype):
             # Compute timestep
             dt = CFL.compute_timestep()
 
-            # Update forcing
-            update_forcing(dt, u)
-
-            # Take timestep
-            solver.step(dt)
-
-            # Save auxiliary state when checkpoint is written
-            if solver.sim_time >= next_checkpoint_t:
+            # Check if we're at a checkpoint time and should save auxiliary state
+            # This MUST happen BEFORE update_forcing to capture the correct forcing state
+            # Dedalus will write checkpoint at this same sim_time during solver.step
+            if solver.sim_time >= next_aux_checkpoint_time - 1e-10:
                 spectra_state = {'next_spec_t': next_spec_t}
                 save_auxiliary_state(run_dir, solver.sim_time, forcing_state_refs, spectra_state, comm)
-                next_checkpoint_t = solver.sim_time + args.checkpoint_dt
+                next_aux_checkpoint_time += args.checkpoint_dt
+
+            # Update forcing (modifies forcing_state_refs in place)
+            update_forcing(dt, u)
+
+            # Take timestep (Dedalus checkpoint may be written here)
+            solver.step(dt)
 
             # Write spectra
             last_spec_t, next_spec_t = write_spectra(
@@ -778,6 +789,28 @@ def run_single_realisation(args, r, dtype):
             solver.log_stats()
         except Exception:
             pass
+
+    # Handle final checkpoint at simulation end
+    # Dedalus file handlers only write during solver.step, so when t_end aligns with
+    # checkpoint_dt, the final checkpoint may not be written (loop exits before next check)
+    # Use evaluate_scheduled() to properly evaluate and write the current field state
+    # (handler.process() writes stale cached data, not the current state)
+    if solver.sim_time >= next_aux_checkpoint_time - 1e-10:
+        # Trigger final checkpoint write with properly evaluated current state
+        solver.evaluator.evaluate_scheduled(
+            wall_time=solver.wall_time,
+            sim_time=solver.sim_time,
+            iteration=solver.iteration,
+            timestep=dt
+        )
+        if comm.rank == 0:
+            logger.info("[run %d] Wrote final checkpoint at t=%.6f", r, solver.sim_time)
+
+        # Save corresponding auxiliary state
+        spectra_state = {'next_spec_t': next_spec_t}
+        save_auxiliary_state(run_dir, solver.sim_time, forcing_state_refs, spectra_state, comm)
+        if comm.rank == 0:
+            logger.info("[run %d] Saved final auxiliary state at t=%.6f", r, solver.sim_time)
 
     if comm.rank == 0:
         logger.info("[run %d] Simulation complete", r)
