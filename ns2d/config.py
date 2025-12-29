@@ -210,6 +210,21 @@ def get_args():
         help="Optional base seed for initial conditions (defaults to --seed if not set)",
     )
 
+    # Checkpoint configuration
+    checkpoint_group = ap.add_argument_group('Checkpoint Configuration')
+    checkpoint_group.add_argument(
+        "--checkpoint_dt", type=float, default=10.0,
+        help="Checkpoint save interval (simulation time units)"
+    )
+    checkpoint_group.add_argument(
+        "--restart", action="store_true",
+        help="Restart from most recent checkpoint in output directory"
+    )
+    checkpoint_group.add_argument(
+        "--restart_file", type=str, default=None,
+        help="Explicit path to checkpoint file (overrides auto-detection)"
+    )
+
     # Output directories and precision
     misc_group = ap.add_argument_group('Miscellaneous')
     misc_group.add_argument(
@@ -291,3 +306,13 @@ def validate_args(args):
 
     if args.ic_energy is not None and args.ic_energy <= 0:
         raise ValueError("ic_energy must be positive when specified")
+
+    # Check checkpoint parameters
+    if args.checkpoint_dt <= 0:
+        raise ValueError("Checkpoint interval checkpoint_dt must be positive")
+
+    if args.restart_file is not None:
+        import pathlib
+        restart_path = pathlib.Path(args.restart_file)
+        if not restart_path.exists():
+            raise ValueError(f"Restart file does not exist: {args.restart_file}")

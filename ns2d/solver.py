@@ -24,6 +24,137 @@ from . import utils
 logger = logging.getLogger(__name__)
 
 
+def find_latest_checkpoint(run_dir):
+    """
+    Find the most recent checkpoint file in run_dir/checkpoints/.
+
+    Dedalus checkpoint files are named checkpoints_s{N}.h5 where N is the
+    write number. We find the file with the highest N.
+
+    Args:
+        run_dir (Path): Directory containing the checkpoints/ subdirectory
+
+    Returns:
+        Path or None: Path to the most recent checkpoint file, or None if none exist
+    """
+    checkpoint_dir = run_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+
+    # Dedalus checkpoint files are named: checkpoints_s{N}.h5
+    checkpoint_files = sorted(checkpoint_dir.glob("checkpoints_s*.h5"))
+    if not checkpoint_files:
+        return None
+
+    return checkpoint_files[-1]
+
+
+def load_auxiliary_state(run_dir, target_time, comm):
+    """
+    Load auxiliary simulation state matching the target simulation time.
+
+    Auxiliary state includes forcing OU state and spectra timing that are
+    not captured by Dedalus's built-in checkpoint system.
+
+    Args:
+        run_dir (Path): Run output directory
+        target_time (float): Target simulation time to match
+        comm: MPI communicator
+
+    Returns:
+        dict or None: Dictionary with 'forcing' and 'spectra' sub-dicts,
+                      or None if no matching auxiliary state found
+    """
+    aux_dir = run_dir / "auxiliary_state"
+    if not aux_dir.exists():
+        return None
+
+    # Find auxiliary file closest to target_time
+    aux_files = sorted(aux_dir.glob("aux_t*.h5"))
+    if not aux_files:
+        return None
+
+    # Find best match by parsing time from filename
+    best_file = None
+    best_diff = float('inf')
+    for f in aux_files:
+        try:
+            t = float(f.stem.split('_t')[1])
+            if abs(t - target_time) < best_diff:
+                best_diff = abs(t - target_time)
+                best_file = f
+        except (ValueError, IndexError):
+            continue
+
+    if best_file is None or best_diff > 1e-3:
+        if comm.rank == 0:
+            logger.warning(
+                "No auxiliary state found matching t=%.6f (best diff=%.6f)",
+                target_time, best_diff
+            )
+        return None
+
+    result = {}
+    if comm.rank == 0:
+        with h5py.File(best_file, 'r') as f:
+            if 'forcing' in f:
+                result['forcing'] = {
+                    'state_x': f['forcing/state_x'][...],
+                    'state_y': f['forcing/state_y'][...],
+                    'scale_state': f['forcing/scale_state'][...],
+                    'step_counter': int(f['forcing/step_counter'][...]),
+                }
+            if 'spectra' in f:
+                result['spectra'] = {
+                    'next_spec_t': float(f['spectra'].attrs['next_spec_t']),
+                }
+        logger.info("Loaded auxiliary state from %s", best_file)
+
+    # Broadcast to all ranks
+    result = comm.bcast(result, root=0)
+    return result
+
+
+def save_auxiliary_state(run_dir, sim_time, forcing_state, spectra_state, comm):
+    """
+    Save auxiliary simulation state not captured by Dedalus checkpoints.
+
+    This saves the internal state of stochastic forcing generators and
+    spectra output timing to enable bit-identical restarts.
+
+    Args:
+        run_dir (Path): Run output directory
+        sim_time (float): Current simulation time
+        forcing_state (dict or None): Forcing state with 'state_x', 'state_y',
+                                       'scale_state', 'step_counter'
+        spectra_state (dict): Spectra state with 'next_spec_t'
+        comm: MPI communicator
+    """
+    if comm.rank != 0:
+        return
+
+    aux_dir = run_dir / "auxiliary_state"
+    aux_dir.mkdir(parents=True, exist_ok=True)
+    aux_file = aux_dir / f"aux_t{sim_time:.6f}.h5"
+
+    with h5py.File(aux_file, 'w') as f:
+        f.attrs['sim_time'] = sim_time
+
+        # Forcing state (if stochastic)
+        if forcing_state is not None:
+            grp = f.create_group('forcing')
+            grp.create_dataset('state_x', data=forcing_state['state_x'])
+            grp.create_dataset('state_y', data=forcing_state['state_y'])
+            grp.create_dataset('scale_state', data=forcing_state['scale_state'])
+            grp.create_dataset('step_counter', data=forcing_state['step_counter'])
+
+        # Spectra output state
+        grp = f.create_group('spectra')
+        grp.attrs['next_spec_t'] = spectra_state['next_spec_t']
+
+    logger.debug("Saved auxiliary state to %s", aux_file)
+
+
 def setup_problem(u, p, tau_p, forcing_vec, nu, alpha, coords, xbasis, ybasis):
     """
     Build the Dedalus IVP for 2D incompressible Navier-Stokes equations.
@@ -166,7 +297,8 @@ def initialise_fields(args, dist, coords, xbasis, ybasis, dtype, comm, r):
     return u, p, tau_p, forcing_vec, kx, ky, KX, KY, K2, K
 
 
-def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, comm, forcing_seed):
+def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, comm,
+                  forcing_seed, initial_forcing_state=None):
     """
     Setup forcing function with optional constant-power rescaling.
 
@@ -179,10 +311,14 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
         KX, KY, K: Wavenumber grids
         comm: MPI communicator
         forcing_seed (int): Seed for distributed forcing generator
+        initial_forcing_state (dict or None): Initial state for restart, with keys
+            'state_x', 'state_y', 'scale_state', 'step_counter'
 
     Returns:
-        callable: update_forcing(dt, u) function that updates forcing_vec;
-                  applies constant-power only if power_mode=='constant'.
+        tuple: (update_forcing, forcing_state_refs)
+            - update_forcing: callable(dt, u) that updates forcing_vec
+            - forcing_state_refs: dict with references to internal state arrays
+              for checkpoint saving, or None for non-stochastic forcing
     """
     forcing_vec.change_scales(1)
 
@@ -190,14 +326,23 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
         def update_forcing(dt, u):
             forcing_vec['g'][0] = 0.0
             forcing_vec['g'][1] = 0.0
-        return update_forcing
+        return update_forcing, None
+
+    # State for exponential smoothing
+    scale_state = np.array([1.0], dtype=np.float64)
+
+    # Restore scale_state if restarting
+    if initial_forcing_state is not None and 'scale_state' in initial_forcing_state:
+        scale_state[0] = initial_forcing_state['scale_state'][0]
 
     # Select forcing generator based on requested type
+    forcing_state_refs = None
+
     if args.forcing == "stochastic":
         shell_mask = forcing.build_forcing_mask(K, args.kmin, args.kmax)
         stype = "ou" if args.stoch_type == "ou" else "white"
 
-        generator = forcing.distributed_stochastic_forcing(
+        generator, generator_state_refs = forcing.distributed_stochastic_forcing(
             dist,
             coords,
             xbasis,
@@ -209,7 +354,17 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
             seed=forcing_seed,
             stype=stype,
             tau=args.tau_ou,
+            initial_state=initial_forcing_state,
         )
+
+        # Build combined state references for checkpointing
+        forcing_state_refs = {
+            'state_x': generator_state_refs['state_x'],
+            'state_y': generator_state_refs['state_y'],
+            'step_counter': generator_state_refs['step_counter'],
+            'scale_state': scale_state,
+        }
+
     elif args.forcing == "kolmogorov":
         generator = forcing.distributed_kolmogorov_forcing(
             dist,
@@ -224,9 +379,6 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
         )
     else:
         raise ValueError(f"Unsupported forcing type {args.forcing}")
-
-    # State for exponential smoothing
-    scale_state = np.array([1.0], dtype=np.float64)
 
     def update_forcing(dt, u):
         """Update forcing, optionally applying constant-power rescaling."""
@@ -254,12 +406,13 @@ def setup_forcing(args, forcing_vec, coords, dist, xbasis, ybasis, KX, KY, K, co
             forcing_vec['g'][0] = fx_loc
             forcing_vec['g'][1] = fy_loc
 
-    return update_forcing
+    return update_forcing, forcing_state_refs
 
 
-def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_dir):
+def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_dir,
+                          file_handler_mode='overwrite'):
     """
-    Setup Dedalus file handlers for snapshots, scalars, and time series.
+    Setup Dedalus file handlers for snapshots, scalars, checkpoints and time series.
 
     Args:
         solver: Dedalus solver instance
@@ -270,6 +423,7 @@ def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_di
         args: Command-line arguments
         r (int): Realisation index
         run_dir (Path): Output directory for this realisation
+        file_handler_mode (str): 'overwrite' for new runs, 'append' for restarts
 
     Returns:
         dict: Dictionary of file handlers
@@ -278,7 +432,8 @@ def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_di
     snapshots = solver.evaluator.add_file_handler(
         str(run_dir / "snapshots"),
         sim_dt=args.snap_dt,
-        max_writes=None
+        max_writes=None,
+        mode=file_handler_mode
     )
     snapshots.add_task(u, name="velocity")
     snapshots.add_task(p, name="pressure")
@@ -289,7 +444,8 @@ def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_di
     scalars = solver.evaluator.add_file_handler(
         str(run_dir / "scalars"),
         sim_dt=args.scalars_dt,
-        max_writes=None
+        max_writes=None,
+        mode=file_handler_mode
     )
 
     # Energy, enstrophy and palinstrophy
@@ -314,7 +470,16 @@ def setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_di
     scalars.add_task(2 * args.nu * P,
                      name="enstrophy_visc_loss")    # 2ν ∫ |∇ω|²
 
-    return {'snapshots': snapshots, 'scalars': scalars}
+    # Checkpoint handler (saves full solver state for restart)
+    checkpoints = solver.evaluator.add_file_handler(
+        str(run_dir / "checkpoints"),
+        sim_dt=args.checkpoint_dt,
+        max_writes=None,  # Keep all checkpoints as requested
+        mode=file_handler_mode
+    )
+    checkpoints.add_tasks(solver.state)
+
+    return {'snapshots': snapshots, 'scalars': scalars, 'checkpoints': checkpoints}
 
 
 def setup_spectra_output(run_dir, spectra_dt):
@@ -408,10 +573,10 @@ def run_single_realisation(args, r, dtype):
 
     This is the main simulation driver that:
     1. Sets up domain and fields
-    2. initialises forcing and initial conditions
+    2. Initialises forcing and initial conditions (or loads from checkpoint)
     3. Configures Dedalus solver and output
     4. Runs time integration loop with CFL control
-    5. Writes diagnostic output
+    5. Writes diagnostic output and periodic checkpoints
 
     Args:
         args: Parsed command-line arguments
@@ -429,6 +594,37 @@ def run_single_realisation(args, r, dtype):
     )
     comm = dist.comm
 
+    # Setup output directories (needed early to check for checkpoints)
+    tag = (args.tag + "_") if args.tag else ""
+    nu_str = f"nu{args.nu:.0e}"
+    root = pathlib.Path(args.outdir) / f"{tag}Nx{args.Nx}_Ny{args.Ny}_{nu_str}"
+    root.mkdir(parents=True, exist_ok=True)
+    run_dir = root / f"realisation_{r:04d}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine restart mode and find checkpoint file
+    restart_mode = False
+    checkpoint_file = None
+    initial_dt = args.cfl_max_dt
+
+    if args.restart or args.restart_file:
+        if args.restart_file:
+            checkpoint_file = pathlib.Path(args.restart_file)
+        else:
+            checkpoint_file = find_latest_checkpoint(run_dir)
+
+        if checkpoint_file is not None and checkpoint_file.exists():
+            restart_mode = True
+            if comm.rank == 0:
+                logger.info("[run %d] Restart mode: found checkpoint %s", r, checkpoint_file)
+        elif comm.rank == 0:
+            if args.restart_file:
+                logger.warning("[run %d] Specified checkpoint file not found: %s", r, args.restart_file)
+            else:
+                logger.info("[run %d] No checkpoint found, starting fresh", r)
+
+    file_handler_mode = 'append' if restart_mode else 'overwrite'
+
     # Initialise fields
     u, p, tau_p, forcing_vec, kx, ky, KX, KY, K2, K = initialise_fields(
         args, dist, coords, xbasis, ybasis, dtype, comm, r
@@ -442,9 +638,33 @@ def run_single_realisation(args, r, dtype):
     solver = problem.build_solver(timestepper)
     solver.stop_sim_time = args.t_end
 
-    # Setup forcing
-    rng = np.random.default_rng(args.seed + r)
-    update_forcing = setup_forcing(
+    # Load checkpoint if restarting
+    initial_forcing_state = None
+    initial_spectra_state = None
+
+    if restart_mode:
+        write, initial_dt = solver.load_state(str(checkpoint_file))
+        if comm.rank == 0:
+            logger.info(
+                "[run %d] Loaded checkpoint: write=%d, sim_time=%.6f, dt=%.2e",
+                r, write, solver.sim_time, initial_dt
+            )
+
+        # Load auxiliary state (forcing OU state, spectra timing)
+        aux_state = load_auxiliary_state(run_dir, solver.sim_time, comm)
+        if aux_state is not None:
+            initial_forcing_state = aux_state.get('forcing')
+            initial_spectra_state = aux_state.get('spectra')
+            if comm.rank == 0:
+                logger.info("[run %d] Loaded auxiliary state for forcing and spectra", r)
+        elif comm.rank == 0:
+            logger.warning(
+                "[run %d] No auxiliary state found; forcing will reinitialise (may affect statistics)",
+                r
+            )
+
+    # Setup forcing (with optional restart state)
+    update_forcing, forcing_state_refs = setup_forcing(
         args,
         forcing_vec,
         coords,
@@ -456,25 +676,26 @@ def run_single_realisation(args, r, dtype):
         K,
         comm,
         args.seed + r,
+        initial_forcing_state=initial_forcing_state,
     )
 
-    # Setup output directories
-    tag = (args.tag + "_") if args.tag else ""
-    nu_str = f"nu{args.nu:.0e}"
-    root = pathlib.Path(args.outdir) / f"{tag}Nx{args.Nx}_Ny{args.Ny}_{nu_str}"
-    root.mkdir(parents=True, exist_ok=True)
-    run_dir = root / f"realisation_{r:04d}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    # Setup output handlers
+    # Setup output handlers with correct mode
     omega_expr = -d3.div(d3.skew(u))
-    handlers = setup_output_handlers(solver, u, p, omega_expr, forcing_vec, args, r, run_dir)
+    handlers = setup_output_handlers(
+        solver, u, p, omega_expr, forcing_vec, args, r, run_dir,
+        file_handler_mode=file_handler_mode
+    )
+
+    # Setup spectra output (with optional restart state)
     spectra_file, last_spec_t, next_spec_t, spectra_logged = setup_spectra_output(run_dir, args.spectra_dt)
+    if initial_spectra_state is not None and 'next_spec_t' in initial_spectra_state:
+        next_spec_t = initial_spectra_state['next_spec_t']
+        last_spec_t = solver.sim_time
 
     # CFL controller
     CFL = d3.CFL(
         solver,
-        initial_dt=args.cfl_max_dt,
+        initial_dt=initial_dt,
         cadence=args.cfl_cadence,
         safety=args.cfl_safety,
         threshold=args.cfl_threshold,
@@ -489,10 +710,17 @@ def run_single_realisation(args, r, dtype):
     flow = d3.GlobalFlowProperty(solver, cadence=args.cfl_cadence)
     flow.add_property(np.sqrt(u @ u), name='speed')
 
+    # Track checkpoint timing for auxiliary state saving
+    last_checkpoint_t = solver.sim_time if restart_mode else -1e99
+    next_checkpoint_t = last_checkpoint_t + args.checkpoint_dt
+
     # Main time integration loop
     try:
         if comm.rank == 0:
-            logger.info("[run %d] Starting time integration", r)
+            if restart_mode:
+                logger.info("[run %d] Resuming time integration from t=%.6f", r, solver.sim_time)
+            else:
+                logger.info("[run %d] Starting time integration", r)
 
         while solver.proceed:
             # Compute timestep
@@ -503,6 +731,12 @@ def run_single_realisation(args, r, dtype):
 
             # Take timestep
             solver.step(dt)
+
+            # Save auxiliary state when checkpoint is written
+            if solver.sim_time >= next_checkpoint_t:
+                spectra_state = {'next_spec_t': next_spec_t}
+                save_auxiliary_state(run_dir, solver.sim_time, forcing_state_refs, spectra_state, comm)
+                next_checkpoint_t = solver.sim_time + args.checkpoint_dt
 
             # Write spectra
             last_spec_t, next_spec_t = write_spectra(

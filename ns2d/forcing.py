@@ -183,9 +183,29 @@ def stochastic_forcing(Nx, Ny, KX, KY, K, mask, rng, sigma_base, stype="white", 
 
 
 def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
-                                   sigma_base, seed=0, stype="white", tau=0.5):
+                                   sigma_base, seed=0, stype="white", tau=0.5,
+                                   initial_state=None):
     """
     Distributed stochastic forcing that mirrors `stochastic_forcing` statistics.
+
+    Args:
+        dist: Dedalus distributor
+        coords: Dedalus coordinate system
+        xbasis, ybasis: RealFourier bases
+        KX, KY: Wavenumber grids
+        mask: Boolean mask selecting forced wavenumbers
+        sigma_base: Target RMS forcing amplitude in grid space
+        seed: Base random seed
+        stype: "white" or "ou" forcing type
+        tau: OU correlation time (for stype="ou")
+        initial_state: Optional dict with 'state_x', 'state_y', 'step_counter'
+                       for restart from checkpoint
+
+    Returns:
+        tuple: (update_function, state_refs_dict)
+            - update_function: callable(dt) -> forcing_field
+            - state_refs_dict: dict with references to internal state arrays
+              for checkpoint saving: {'state_x', 'state_y', 'step_counter'}
     """
 
     if stype not in ("white", "ou"):
@@ -264,6 +284,19 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
     # Step counter for time-decorrelated seeds in white/OU forcing.
     step_counter = np.array([0], dtype=np.int64)
 
+    # Restore state if restarting from checkpoint
+    if initial_state is not None:
+        if 'state_x' in initial_state and initial_state['state_x'] is not None:
+            # Broadcast from rank 0 if needed (state was loaded on rank 0)
+            state_x_loaded = initial_state['state_x']
+            state_y_loaded = initial_state['state_y']
+            # Handle shape matching for local coefficients
+            if state_x_loaded.shape == state_x.shape:
+                state_x[...] = state_x_loaded
+                state_y[...] = state_y_loaded
+        if 'step_counter' in initial_state and initial_state['step_counter'] is not None:
+            step_counter[0] = initial_state['step_counter']
+
     def update(dt):
         """Generate one timestep of distributed stochastic forcing."""
         step_counter[0] += 1
@@ -330,7 +363,13 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
         forcing_field.require_grid_space()
         return forcing_field
 
-    return update
+    # Return update function and references to internal state for checkpointing
+    state_refs = {
+        'state_x': state_x,
+        'state_y': state_y,
+        'step_counter': step_counter,
+    }
+    return update, state_refs
 
 
 def distributed_kolmogorov_forcing(dist, coords, xbasis, ybasis,
