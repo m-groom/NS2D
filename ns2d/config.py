@@ -175,6 +175,15 @@ def get_args():
         "--scalars_dt", type=float, default=0.05,
         help="Scalar time-series output interval (energy, enstrophy, etc.)"
     )
+    output_group.add_argument(
+        "--coarse_N", type=int, default=0,
+        help="Grid size of the in-situ spectrally truncated output "
+             "(0 disables it); must divide both Nx and Ny"
+    )
+    output_group.add_argument(
+        "--coarse_dt", type=float, default=0.05,
+        help="Output interval for the coarse (--coarse_N) handler"
+    )
 
     # Ensemble and reproducibility
     ensemble_group = ap.add_argument_group('Ensemble Configuration')
@@ -208,6 +217,21 @@ def get_args():
     ic_group.add_argument(
         "--ic_seed", type=int, default=None,
         help="Optional base seed for initial conditions (defaults to --seed if not set)",
+    )
+
+    # Checkpoint configuration
+    checkpoint_group = ap.add_argument_group('Checkpoint Configuration')
+    checkpoint_group.add_argument(
+        "--checkpoint_dt", type=float, default=10.0,
+        help="Checkpoint save interval (simulation time units)"
+    )
+    checkpoint_group.add_argument(
+        "--restart", action="store_true",
+        help="Restart from most recent checkpoint in output directory"
+    )
+    checkpoint_group.add_argument(
+        "--restart_file", type=str, default=None,
+        help="Explicit path to checkpoint file (overrides auto-detection)"
     )
 
     # Output directories and precision
@@ -286,8 +310,28 @@ def validate_args(args):
     if args.snap_dt <= 0 or args.spectra_dt <= 0 or args.scalars_dt <= 0:
         raise ValueError("All output intervals must be positive")
 
+    if args.coarse_N:
+        if args.coarse_N <= 0:
+            raise ValueError("coarse_N must be positive when the coarse output is enabled")
+        if args.Nx % args.coarse_N or args.Ny % args.coarse_N:
+            raise ValueError(
+                f"coarse_N={args.coarse_N} must divide both Nx={args.Nx} and Ny={args.Ny}"
+            )
+        if args.coarse_dt <= 0:
+            raise ValueError("coarse_dt must be positive")
+
     if args.n_realisations <= 0:
         raise ValueError("Number of realisations must be positive")
 
     if args.ic_energy is not None and args.ic_energy <= 0:
         raise ValueError("ic_energy must be positive when specified")
+
+    # Check checkpoint parameters
+    if args.checkpoint_dt <= 0:
+        raise ValueError("Checkpoint interval checkpoint_dt must be positive")
+
+    if args.restart_file is not None:
+        import pathlib
+        restart_path = pathlib.Path(args.restart_file)
+        if not restart_path.exists():
+            raise ValueError(f"Restart file does not exist: {args.restart_file}")

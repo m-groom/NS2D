@@ -10,6 +10,7 @@ constant-power rescaling to maintain a target energy injection rate.
 """
 
 import numpy as np
+import dedalus.public as d3
 from mpi4py import MPI
 
 from . import spectral
@@ -182,10 +183,53 @@ def stochastic_forcing(Nx, Ny, KX, KY, K, mask, rng, sigma_base, stype="white", 
     return update
 
 
+def _step_seed(seed, realisation, step):
+    """
+    Derive an independent per-step seed from (base seed, realisation, step).
+
+    Additive seeds (`seed + realisation + step`) make realisation r+1 replay
+    realisation r shifted by one timestep. Hashing the triple through
+    SeedSequence gives each (realisation, step) pair its own stream.
+
+    Args:
+        seed (int): Base random seed, shared by every realisation
+        realisation (int): Realisation index
+        step (int): Timestep counter within the realisation
+
+    Returns:
+        int: A 32-bit seed for this (realisation, step)
+    """
+    ss = np.random.SeedSequence([int(seed), int(realisation), int(step)])
+    return int(ss.generate_state(1, dtype=np.uint32)[0])
+
+
 def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
-                                   sigma_base, seed=0, stype="white", tau=0.5):
+                                   sigma_base, seed=0, realisation=0, stype="white",
+                                   tau=0.5, initial_state=None):
     """
     Distributed stochastic forcing that mirrors `stochastic_forcing` statistics.
+
+    Args:
+        dist: Dedalus distributor
+        coords: Dedalus coordinate system
+        xbasis, ybasis: RealFourier bases
+        KX, KY: Wavenumber grids
+        mask: Boolean mask selecting forced wavenumbers
+        sigma_base: Target RMS forcing amplitude in grid space
+        seed: Base random seed (shared by every realisation)
+        realisation: Realisation index, hashed into the per-step seed so that
+            different realisations draw statistically independent noise
+        stype: "white" or "ou" forcing type
+        tau: OU correlation time (for stype="ou")
+        initial_state: Optional dict with 'state_potential' (this rank's slice of the
+                       potential coefficients) and 'step_counter', for restart
+                       from checkpoint
+
+    Returns:
+        tuple: (update_function, state_refs_dict)
+            - update_function: callable(dt) -> forcing_field
+            - state_refs_dict: dict with references to internal state arrays
+              for checkpoint saving: {'state_potential', 'step_counter'}
     """
 
     if stype not in ("white", "ou"):
@@ -213,27 +257,34 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
     kmin_phys = float(K_mag[mask].min())
     kmax_phys = float(K_mag[mask].max())
 
-    # Allocate a coefficient-space vector field for the forcing.
-    forcing_field = dist.VectorField(coords, bases=(xbasis, ybasis), name="forcing")
-    forcing_field.require_coeff_space()
+    # Allocate a coefficient-space scalar potential for the forcing. The forcing
+    # is f = ∇⊥φ = skew(grad(φ)), which is divergence-free by construction: no
+    # projection is needed, and none is possible element-wise in a RealFourier
+    # basis, where the divergence maps cos to sin and so couples different
+    # coefficient slots.
+    potential = dist.Field(bases=(xbasis, ybasis), name="forcing_potential")
+    potential.require_coeff_space()
+    forcing_op = d3.skew(d3.grad(potential))
+    pot_c = potential['c']
 
-    # Local RealFourier mode numbers (integers) for each axis.
+    # Local RealFourier coefficient indices for each axis. Coefficient index 2n
+    # holds cos(n x) and index 2n+1 holds -sin(n x), so the mode number is
+    # index // 2 -- the same convention spectral._prepare_shell_metadata uses.
     kx_modes = dist.local_modes(xbasis)
     ky_modes = dist.local_modes(ybasis)
 
     # Broadcast mode numbers to match the local coefficient array shape.
-    fx_c = forcing_field['c'][0]
-    fy_c = forcing_field['c'][1]
-    kx_modes_2d = np.broadcast_to(kx_modes, fx_c.shape)
-    ky_modes_2d = np.broadcast_to(ky_modes, fy_c.shape)
+    kx_modes_2d = np.broadcast_to(kx_modes, pot_c.shape) // 2
+    ky_modes_2d = np.broadcast_to(ky_modes, pot_c.shape) // 2
 
-    # Physical wavenumbers for each local coefficient (for divergence-free projection).
+    # Physical wavenumbers for each local coefficient.
     kx_phys_local = (2.0 * np.pi / Lx) * kx_modes_2d
     ky_phys_local = (2.0 * np.pi / Ly) * ky_modes_2d
+    k_phys_local = np.sqrt(kx_phys_local ** 2 + ky_phys_local ** 2)
 
     # Choose shell indices whose physical wavenumbers lie in [kmin_phys, kmax_phys].
     weight_local, shell_idx_local, k0 = spectral._prepare_shell_metadata(
-        forcing_field, dist, xbasis, ybasis, Lx, Ly
+        potential, dist, xbasis, ybasis, Lx, Ly
     )
     # Shell m corresponds to |k| ≈ m * k0.
     m_min = int(np.ceil(kmin_phys / k0))
@@ -257,80 +308,77 @@ def distributed_stochastic_forcing(dist, coords, xbasis, ybasis, KX, KY, mask,
     # so choose s such that <f^2> ≈ sigma_base^2.
     norm = np.sqrt(2.0) * sigma_base / np.sqrt(max(M_eff, 1.0))
 
-    # State for OU process (in coefficient space).
-    state_x = np.zeros_like(fx_c)
-    state_y = np.zeros_like(fy_c)
+    # With f = ∇⊥φ we have <|f|²> = <|k|² |φ̂|²>, so dividing each potential
+    # coefficient by |k| leaves the forcing variance that `norm` targets.
+    inv_k_local = np.zeros_like(k_phys_local)
+    np.divide(1.0, k_phys_local, out=inv_k_local, where=(k_phys_local > 0.0))
+
+    # State for OU process (potential coefficients).
+    state_potential = np.zeros_like(pot_c)
 
     # Step counter for time-decorrelated seeds in white/OU forcing.
     step_counter = np.array([0], dtype=np.int64)
+
+    # Restore state if restarting from checkpoint
+    if initial_state is not None:
+        if 'state_potential' in initial_state and initial_state['state_potential'] is not None:
+            # This rank's own slice of the potential coefficients.
+            state_potential_loaded = initial_state['state_potential']
+            if state_potential_loaded.shape != state_potential.shape:
+                raise ValueError(
+                    f"Checkpointed forcing state has shape {state_potential_loaded.shape} "
+                    f"but this rank holds {state_potential.shape}; restart with the same "
+                    "number of MPI ranks as the run that wrote the checkpoint."
+                )
+            state_potential[...] = state_potential_loaded
+        if 'step_counter' in initial_state and initial_state['step_counter'] is not None:
+            step_counter[0] = initial_state['step_counter']
 
     def update(dt):
         """Generate one timestep of distributed stochastic forcing."""
         step_counter[0] += 1
         dt_safe = max(dt, 1e-12)
 
-        # Work in coefficient space for the forcing field.
-        forcing_field.require_coeff_space()
-        fx_c = forcing_field['c'][0]
-        fy_c = forcing_field['c'][1]
-        fx_c.fill(0.0)
-        fy_c.fill(0.0)
+        # Fill the potential with standard-normal noise in coefficient space
+        # using Dedalus's layout-independent (decomposition-independent) RNG.
+        potential.require_coeff_space()
+        potential.fill_random(
+            layout='c',
+            seed=_step_seed(seed, realisation, step_counter[0]),
+            distribution='standard_normal',
+        )
+        eta = potential['c']
 
         if stype == "white":
             # White-in-time forcing: f ~ ξ / sqrt(dt), where ξ ~ N(0, norm^2).
             scale = norm / np.sqrt(dt_safe)
 
-            # Fill with standard-normal noise in coefficient space using
-            # Dedalus's layout-independent RNG utilities.
-            forcing_field.fill_random(
-                layout='c',
-                seed=int(seed) + int(step_counter[0]),
-                distribution='standard_normal',
-            )
-
-            # Apply scale and mask in RealFourier coefficient space.
-            fx_c *= scale
-            fy_c *= scale
-            fx_c[~mask_local] = 0.0
-            fy_c[~mask_local] = 0.0
-
-            # Project to divergence-free using physical wavenumbers.
-            tmp_x, tmp_y = project_div_free(kx_phys_local, ky_phys_local, fx_c, fy_c)
-            fx_c[...] = tmp_x
-            fy_c[...] = tmp_y
+            # Apply scale, the 1/|k| potential weighting and the band mask.
+            eta *= scale * inv_k_local
+            eta[~mask_local] = 0.0
 
         else:
             # Ornstein-Uhlenbeck forcing in coefficient space.
             e = np.exp(-dt_safe / tau)
             s_ou = norm * np.sqrt(max(0.0, 1.0 - e * e))
 
-            # Generate standard-normal noise for the OU increment.
-            forcing_field.fill_random(
-                layout='c',
-                seed=int(seed) + 10_000_000 + int(step_counter[0]),
-                distribution='standard_normal',
-            )
-            eta_x = forcing_field['c'][0]
-            eta_y = forcing_field['c'][1]
-
             # Update OU state only on forced modes.
-            state_x[:] = e * state_x
-            state_y[:] = e * state_y
-            state_x[mask_local] += s_ou * eta_x[mask_local]
-            state_y[mask_local] += s_ou * eta_y[mask_local]
-            state_x[~mask_local] = 0.0
-            state_y[~mask_local] = 0.0
+            state_potential[:] = e * state_potential
+            state_potential[mask_local] += s_ou * eta[mask_local] * inv_k_local[mask_local]
+            state_potential[~mask_local] = 0.0
+            eta[...] = state_potential
 
-            # Project OU state to divergence-free and use as forcing.
-            tmp_x, tmp_y = project_div_free(kx_phys_local, ky_phys_local, state_x, state_y)
-            fx_c[...] = tmp_x
-            fy_c[...] = tmp_y
-
-        # Return VectorField with updated forcing
-        forcing_field.require_grid_space()
+        # f = ∇⊥φ, evaluated onto the unit-scale grid.
+        forcing_field = forcing_op.evaluate()
+        forcing_field.change_scales(1)
         return forcing_field
 
-    return update
+    # Return update function and references to internal state for checkpointing
+    state_refs = {
+        'state_potential': state_potential,
+        'step_counter': step_counter,
+    }
+    return update, state_refs
 
 
 def distributed_kolmogorov_forcing(dist, coords, xbasis, ybasis,

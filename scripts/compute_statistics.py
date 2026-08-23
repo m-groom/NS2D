@@ -119,10 +119,10 @@ def main():
             print(f"Taylor Reynolds number Re_λ: {Re_lambda:.2f}")
 
         # Energy balance (if all terms available)
-        if all(k in series_dict for k in ["inj", "drag_loss", "visc_loss"]):
+        if all(k in series_dict for k in ["energy_injection", "drag_loss", "visc_loss"]):
             mask = (times >= t_start) & (times <= t_end)
 
-            inj_mean = np.mean(series_dict["inj"][mask])
+            inj_mean = np.mean(series_dict["energy_injection"][mask])
             drag_mean = np.mean(series_dict["drag_loss"][mask])
             visc_mean = np.mean(series_dict["visc_loss"][mask])
             residual = inj_mean - drag_mean - visc_mean
