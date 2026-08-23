@@ -175,6 +175,15 @@ def get_args():
         "--scalars_dt", type=float, default=0.05,
         help="Scalar time-series output interval (energy, enstrophy, etc.)"
     )
+    output_group.add_argument(
+        "--coarse_N", type=int, default=0,
+        help="Grid size of the in-situ spectrally truncated output "
+             "(0 disables it); must divide both Nx and Ny"
+    )
+    output_group.add_argument(
+        "--coarse_dt", type=float, default=0.05,
+        help="Output interval for the coarse (--coarse_N) handler"
+    )
 
     # Ensemble and reproducibility
     ensemble_group = ap.add_argument_group('Ensemble Configuration')
@@ -300,6 +309,16 @@ def validate_args(args):
     # Check output parameters
     if args.snap_dt <= 0 or args.spectra_dt <= 0 or args.scalars_dt <= 0:
         raise ValueError("All output intervals must be positive")
+
+    if args.coarse_N:
+        if args.coarse_N <= 0:
+            raise ValueError("coarse_N must be positive when the coarse output is enabled")
+        if args.Nx % args.coarse_N or args.Ny % args.coarse_N:
+            raise ValueError(
+                f"coarse_N={args.coarse_N} must divide both Nx={args.Nx} and Ny={args.Ny}"
+            )
+        if args.coarse_dt <= 0:
+            raise ValueError("coarse_dt must be positive")
 
     if args.n_realisations <= 0:
         raise ValueError("Number of realisations must be positive")

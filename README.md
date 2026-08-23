@@ -11,7 +11,8 @@ Forced 2D incompressible Navier-Stokes (velocity-pressure formulation) on a toru
 - Diagnostics:
   - Energy/enstrophy spectra and spectral fluxes
   - Time series of integrated quantities (energy, enstrophy, palinstrophy, energy budget terms)
-  - Field snapshots (velocity, vorticity, pressure, streamfunction)
+  - Field snapshots (velocity, vorticity, pressure, forcing)
+  - In-situ spectrally truncated output on a coarse grid, adding the streamfunction
 - Multiple independent realisations with reproducible forcing
 
 ### Post-Processing
@@ -195,6 +196,9 @@ All simulation parameters are controlled via command-line arguments. Key options
 - `--snap_dt`: Snapshot output interval (default: 1.0)
 - `--scalars_dt`: Scalar time series interval (default: 0.05)
 - `--spectra_dt`: Spectra/flux output interval (default: 0.25)
+- `--coarse_N`: Grid size of the in-situ spectrally truncated output (default: 0 = disabled).
+  Must divide both `Nx` and `Ny`.
+- `--coarse_dt`: Output interval for the coarse handler (default: 0.05)
 
 ### Ensemble
 - `--n_realisations`: Number of independent realisations (default: 1)
@@ -217,7 +221,11 @@ snapshots/
 └── Nx1024_Ny1024_nu5e-05/
     ├── realisation_0000/
     │   ├── snapshots/          # HDF5 snapshots of fields
+    │   ├── coarse/             # HDF5 snapshots truncated to coarse_N (if enabled)
     │   ├── scalars/            # HDF5 time series (energy, enstrophy, etc.)
+    │   ├── checkpoints/        # Dedalus solver state for --restart
+    │   ├── auxiliary_state/    # Forcing and spectra state matching each checkpoint
+    │   ├── run_config.jsonl    # One JSON record per invocation: arguments, git hash, versions
     │   └── spectra.h5          # Spectra and fluxes at multiple times
     ├── realisation_0001/
     └── ...
@@ -225,15 +233,28 @@ snapshots/
 
 ### Output Files
 
-1. **snapshots/**: Field snapshots (velocity, pressure, vorticity, streamfunction)
+1. **snapshots/**: Field snapshots (velocity, pressure, vorticity, forcing)
    - Written every `snap_dt` time units
    - Dedalus HDF5 format (use `h5py` or Dedalus post-processing tools)
+
+   **coarse/**: the same fields spectrally truncated to `coarse_N`², plus the
+   streamfunction, written every `coarse_dt` time units. `add_task(..., scales=...)`
+   truncates in coefficient space, so each field equals a sharp offline truncation
+   of the full-resolution field. A 64² write is ~256× smaller than a 1024² one, so
+   this is the practical way to get a dense-in-time dataset from a large run.
+
+   Sign conventions, recorded as root attributes on every output file:
+
+   - `ω = ∂x v − ∂y u`
+   - `Δψ = −ω`, hence `u = (∂yψ, −∂xψ)`
+
+   Note that this is the opposite of the more common `Δψ = +ω` convention.
 
 2. **scalars/**: Time series of integrated quantities
    - `energy`: Total kinetic energy E = ½∫|u|² dx
    - `enstrophy`: Total enstrophy Z = ∫|ω|² dx
    - `palinstrophy`: Palinstrophy P = ∫|∇ω|² dx
-   - `inj`: Energy injection rate εᵢ = ∫u·f dx
+   - `energy_injection`: Energy injection rate εᵢ = ∫u·f dx
    - `drag_loss`: Drag dissipation εₐ = α∫|u|² dx
    - `visc_loss`: Viscous dissipation εᵥ = ν∫|ω|² dx
    - Written every `scalars_dt` time units
